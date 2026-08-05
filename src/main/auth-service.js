@@ -8,6 +8,7 @@ const crypto = require('crypto');
 const { getDb } = require('./database');
 const { apiClient } = require('./api-client');
 const { encryptToken, decryptToken } = require('./token-crypto');
+const imageCache = require('./image-cache');
 
 const OFFLINE_MAX_DAYS = 7;
 
@@ -557,6 +558,8 @@ class AuthService {
             WHERE sucursal_id = ?
           `, [now, sucursalId]);
         }); // commit + persist síncrono a disco
+
+        imageCache.reconcileProducts(products);
 
         console.log(`[AUTH] Products synced: ${products.length} items`);
         notify({ step: 'products-done', message: `${products.length} productos descargados.` });

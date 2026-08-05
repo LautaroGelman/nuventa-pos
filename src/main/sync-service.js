@@ -5,6 +5,7 @@
 const EventEmitter = require('events');
 const { getDb } = require('./database');
 const { apiClient } = require('./api-client');
+const imageCache = require('./image-cache');
 
 // Full cloud↔local reconciliation every hour.
 // If a sync fails (offline), a 5-minute retry fires until the
@@ -663,6 +664,8 @@ class SyncService extends EventEmitter {
         [now]
       );
       }); // transaction() commits and persists to disk synchronously
+
+      imageCache.reconcileProducts(cloudProducts);
 
       this._log('DOWNLOAD_PRODUCTS', `${cloudProducts.length} products synced`, 'ok');
       console.log(`[SYNC] Products synced: ${cloudProducts.length} items`);

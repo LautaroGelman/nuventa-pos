@@ -12,6 +12,7 @@ const { getDb } = require('./database');
 const { authService } = require('./auth-service');
 const { apiClient } = require('./api-client');
 const { decryptToken } = require('./token-crypto');
+const imageCache = require('./image-cache');
 
 // ── Login event emitter ──────────────────────────────────
 // index.js listens on this to: start sync + forward status to renderer
@@ -413,12 +414,20 @@ async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false }
       const productId = Number(imagePathMatch[1]);
       if (method === 'DELETE') {
         db.run('UPDATE products SET image_url = NULL, thumbnail_url = NULL WHERE id = ?', [productId]);
+        db.save();
+        imageCache.removeProduct(productId);
       } else {
         try {
           const image = responseText ? JSON.parse(responseText) : {};
           db.run('UPDATE products SET image_url = ?, thumbnail_url = ? WHERE id = ?', [
             image.imageUrl || null, image.thumbnailUrl || null, productId,
           ]);
+          db.save();
+          imageCache.enqueueProduct({
+            id: productId,
+            imageUrl: image.imageUrl || null,
+            thumbnailUrl: image.thumbnailUrl || null,
+          });
         } catch (_) { /* el próximo sync reconciliará la fila */ }
       }
     }
@@ -592,8 +601,8 @@ function productToDto(p) {
     // Pesable: el POS lo necesita para resolver el PLU de una etiqueta de balanza escaneada.
     weighable: !!p.weighable,
     maxUnitPrice: p.max_unit_price ?? null,
-    imageUrl: p.image_url || null,
-    thumbnailUrl: p.thumbnail_url || null,
+    imageUrl: imageCache.getLocalUrl(p.id, 'image', p.image_url) || p.image_url || null,
+    thumbnailUrl: imageCache.getLocalUrl(p.id, 'thumbnail', p.thumbnail_url) || p.thumbnail_url || null,
   };
 }
 
@@ -1946,6 +1955,14 @@ function startLocalServer() {
           }
           return await proxyToCloud(req, res, req.method, req.url, rawImageBody, { rawBody: true });
         }
+
+        // ── Local product images (cached offline) ──────────
+        const localImageMatch = subpath.match(/^\/api\/local-product-images\/(\d+)\/(image|thumbnail)$/);
+        if (localImageMatch && req.method === 'GET') {
+          imageCache.serveRequest(req, res, Number(localImageMatch[1]), localImageMatch[2]);
+          return;
+        }
+
         let body;
         if (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH') {
           body = await parseBody(req);

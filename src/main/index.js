@@ -17,6 +17,7 @@ const { authService } = require('./auth-service');
 const { SyncService } = require('./sync-service');
 const { startLocalServer, stopLocalServer, getServerPort, loginEvents } = require('./local-server');
 const { encryptToken, decryptToken } = require('./token-crypto');
+const imageCache = require('./image-cache');
 
 let mainWindow = null;
 let syncService = null;
@@ -746,12 +747,18 @@ function buildMenu() {
             const registerCount = db.get("SELECT COUNT(*) as cnt FROM cash_registers");
             const lastSync = db.get("SELECT value FROM app_config WHERE key = 'last_product_sync'");
             const userCount = db.get("SELECT COUNT(*) as cnt FROM users");
+            const imgStats = imageCache.getStats();
+            const imageLine = imgStats
+              ? `Imagenes locales: ${imgStats.fileCount} (${imgStats.imageCount} full + ${imgStats.thumbnailCount} mini, ${imgStats.totalMB} MB / ${imgStats.cacheLimitMB} MB)${imgStats.suspended ? ' ⚠ PAUSADO' : ''}\n` +
+                `Espacio libre disco: ${imgStats.freeDiskGB} GB`
+              : 'Imagenes locales: N/A';
             dialog.showMessageBox({
               type: 'info',
               title: 'Estado Offline',
               message: `Conexión: ${isOffline ? '❌ Sin conexión' : '✅ Conectado'}\n` +
                 `Usuarios locales: ${userCount?.cnt || 0}\n` +
                 `Productos cacheados: ${productCount?.cnt || 0}\n` +
+                imageLine + '\n' +
                 `Cajas registradoras: ${registerCount?.cnt || 0}\n` +
                 `Ventas pendientes de sync: ${pendingSales?.cnt || 0}\n` +
                 `Último sync: ${lastSync?.value || 'Nunca'}`,
@@ -808,6 +815,9 @@ app.whenReady().then(async () => {
 
   // 2. Initialize SQLite database
   await initDatabase();
+
+  // 2b. Initialize image cache (product images for offline display)
+  imageCache.initialize();
 
   // 3. Start local API server (handles ALL /api/* requests in local-first mode)
   const localPort = await startLocalServer();
@@ -918,6 +928,7 @@ app.on('window-all-closed', async () => {
     db.run("UPDATE users SET last_token = NULL"); // A10: que el login offline no reuse el token tras cerrar la app
     db.save();
   } catch { /* best-effort */ }
+  imageCache.shutdown();
   stopLocalServer();
   closeDatabase();
   app.quit();
