@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nuventa POS — Modo Offline</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="config-container">
+    <div class="config-logo">
+      <h1>Nuventa <span class="accent">POS</span></h1>
+      <p class="subtitle">Modo Offline</p>
+    </div>
+
+    <div class="config-card">
+      <!-- Offline banner -->
+      <div class="offline-warning">
+        <p>⚠️ <strong>No se pudo conectar al servidor.</strong></p>
+        <p>Si ya iniciaste sesión antes, podés ingresar con tus credenciales guardadas.</p>
+      </div>
+
+      <!-- ── Environment badge ── -->
+      <div id="env-badge" class="env-badge env-prod">
+        <span id="env-label">PROD</span>
+        <span id="env-urls" class="env-urls"></span>
+      </div>
+
+      <!-- ── Login Section ── -->
+      <div id="section-login">
+        <div class="form-group">
+          <label for="input-email">Email</label>
+          <input
+            type="email"
+            id="input-email"
+            placeholder="tu@email.com"
+            autocomplete="email"
+            autofocus
+          />
+        </div>
+        <div class="form-group">
+          <label for="input-password">Contraseña</label>
+          <input
+            type="password"
+            id="input-password"
+            placeholder="••••••••"
+            autocomplete="current-password"
+          />
+        </div>
+
+        <div id="error-msg" class="error-msg hidden"></div>
+
+        <div id="status-msg" class="status-msg hidden">
+          <div class="spinner"></div>
+          <span id="status-text">Verificando credenciales...</span>
+        </div>
+
+        <button id="btn-login" class="btn btn-primary btn-block">
+          🔐 Iniciar sesión (offline)
+        </button>
+      </div>
+
+      <div class="config-footer">
+        <p class="hint">
+          <kbd>Ctrl+Shift+V</kbd> = punto de venta &nbsp;|&nbsp;
+          <kbd>Ctrl+R</kbd> = reintentar conexión
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

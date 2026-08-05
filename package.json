@@ -1,0 +1,47 @@
+{
+  "name": "nuventa-pos",
+  "version": "1.0.0",
+  "description": "Nuventa POS - Punto de Venta Offline-First para Windows",
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "electron .",
+    "start:dev": "electron . --dev",
+    "build:frontend": "cd ../nuventa-frontend-dev && pnpm build",
+    "build:web": "npm run build:frontend && node -e \"const{cpSync,rmSync,mkdirSync}=require('fs');const src='../nuventa-frontend-dev/out';const dst='resources/web';rmSync(dst,{recursive:true,force:true});mkdirSync(dst,{recursive:true});cpSync(src,dst,{recursive:true});console.log('Web assets copied to',dst);\"",
+    "build": "npm run build:web && electron-builder --win",
+    "build:portable": "npm run build:web && electron-builder --win portable"
+  },
+  "author": "Nuventa",
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "sql.js": "^1.11.0"
+  },
+  "devDependencies": {
+    "electron": "^33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.nuventa.pos",
+    "productName": "Nuventa POS",
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "assets/icon.ico",
+      "artifactName": "Nuventa-POS-Setup-${version}.${ext}"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "resources/web/**/*",
+      "node_modules/sql.js/dist/**/*"
+    ]
+  }
+}

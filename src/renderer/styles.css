@@ -1,0 +1,284 @@
+/* ============================================================
+   Nuventa POS — Login & Config Screen Styles
+   ============================================================ */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --primary:    #6C3CE1;
+  --primary-d:  #5428C0;
+  --accent:     #FF6B35;
+  --success:    #22C55E;
+  --bg:         #0F172A;
+  --bg-card:    #1E293B;
+  --bg-input:   #334155;
+  --text:       #F1F5F9;
+  --text-dim:   #94A3B8;
+  --border:     #475569;
+  --radius:     10px;
+  --radius-sm:  6px;
+  --font:       'Segoe UI', system-ui, -apple-system, sans-serif;
+}
+
+html, body {
+  height: 100%;
+  font-family: var(--font);
+  background: linear-gradient(135deg, #0F172A 0%, #1a1040 100%);
+  color: var(--text);
+  font-size: 15px;
+  overflow: hidden;
+  user-select: none;
+}
+
+.config-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  padding: 24px;
+}
+
+.config-logo {
+  text-align: center;
+  margin-bottom: 24px;
+}
+
+.config-logo h1 {
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+
+.config-logo .accent {
+  color: var(--accent);
+}
+
+.config-logo .subtitle {
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  margin-top: 4px;
+}
+
+.config-card {
+  background: var(--bg-card);
+  border-radius: var(--radius);
+  padding: 28px;
+  width: 100%;
+  max-width: 440px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.4);
+}
+
+/* ── Form ───────────────────────────────────────────────── */
+
+.form-group {
+  margin-bottom: 16px;
+}
+
+.form-group label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.form-group input {
+  width: 100%;
+  padding: 10px 14px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 0.95rem;
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.form-group input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(108, 60, 225, 0.25);
+}
+
+.form-group input::placeholder {
+  color: #64748B;
+}
+
+/* ── Messages ───────────────────────────────────────────── */
+
+.error-msg {
+  background: rgba(239, 68, 68, 0.15);
+  color: #FCA5A5;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+
+.success-msg {
+  background: rgba(34, 197, 94, 0.15);
+  color: #86EFAC;
+  padding: 8px 12px;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  margin: 8px 0 12px;
+  text-align: center;
+}
+
+.status-msg {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(108, 60, 225, 0.15);
+  color: #C4B5FD;
+  padding: 10px 14px;
+  border-radius: var(--radius-sm);
+  font-size: 0.85rem;
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+
+.hidden { display: none !important; }
+
+/* ── Spinner ────────────────────────────────────────────── */
+
+.spinner {
+  width: 18px;
+  height: 18px;
+  border: 2px solid rgba(196, 181, 253, 0.3);
+  border-top-color: #C4B5FD;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ── Buttons ────────────────────────────────────────────── */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 10px 20px;
+  border-radius: var(--radius-sm);
+  border: none;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--primary);
+  color: white;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--primary-d);
+}
+
+.btn-secondary {
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.btn-block {
+  width: 100%;
+}
+
+/* ── Footer ─────────────────────────────────────────────── */
+
+.config-footer {
+  margin-top: 20px;
+  text-align: center;
+}
+
+.hint {
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  margin-bottom: 8px;
+  line-height: 1.4;
+}
+
+kbd {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 1px 6px;
+  font-size: 0.75rem;
+  font-family: monospace;
+}
+
+/* ── Offline warning ───────────────────────────────────── */
+.offline-warning {
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid #EF4444;
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.offline-warning p {
+  margin-bottom: 4px;
+}
+
+.offline-warning p:last-child {
+  margin-bottom: 0;
+}
+
+/* ── Environment badge ─────────────────────────────────── */
+.env-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 8px 14px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 16px;
+  font-weight: 600;
+  font-size: 0.82rem;
+  text-align: center;
+}
+
+.env-badge .env-urls {
+  font-weight: 400;
+  font-size: 0.72rem;
+  opacity: 0.8;
+}
+
+.env-prod {
+  background: rgba(34, 197, 94, 0.12);
+  color: #86EFAC;
+  border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.env-dev {
+  background: rgba(251, 191, 36, 0.12);
+  color: #FDE68A;
+  border: 1px solid rgba(251, 191, 36, 0.3);
+}
+
+code {
+  background: var(--bg-input);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 0.8rem;
+}
+
