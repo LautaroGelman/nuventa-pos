@@ -212,6 +212,44 @@ function findLatestEntry(productId, type) {
   return best;
 }
 
+function findLatestValidEntry(productId, type) {
+  if (!_manifest) return null;
+  const prefix = `${productId}:${type}:`;
+  const entries = [];
+  for (const key of Object.keys(_manifest)) {
+    if (!key.startsWith(prefix)) continue;
+    entries.push({ key, ..._manifest[key] });
+  }
+  entries.sort((a, b) => (b.revisionCreatedAt || 0) - (a.revisionCreatedAt || 0));
+  for (const entry of entries) {
+    if (entryFileExists(entry)) return entry;
+    // Stale — clean up
+    delete _manifest[entry.key];
+    markManifestDirty();
+  }
+  return null;
+}
+
+function findEntryByNormalizedUrlValid(productId, type, normalizedUrl) {
+  if (!_manifest || !normalizedUrl) return null;
+  const prefix = `${productId}:${type}:`;
+  const entries = [];
+  for (const key of Object.keys(_manifest)) {
+    if (!key.startsWith(prefix)) continue;
+    const entry = _manifest[key];
+    if (entry.normalizedSourceUrl === normalizedUrl) {
+      entries.push({ key, ...entry });
+    }
+  }
+  entries.sort((a, b) => (b.revisionCreatedAt || 0) - (a.revisionCreatedAt || 0));
+  for (const entry of entries) {
+    if (entryFileExists(entry)) return entry;
+    delete _manifest[entry.key];
+    markManifestDirty();
+  }
+  return null;
+}
+
 function hasLocalVersion(productId, type, sourceUrl) {
   if (!sourceUrl) return false;
   const sk = computeSourceKey(sourceUrl);
@@ -303,7 +341,6 @@ function tryResume() {
 
 function _derivePendingProductTypes() {
   const s = new Set();
-  for (const pt of _desiredKeys.keys()) s.add(pt);
   for (const key of _pendingKeys) {
     const parts = key.split(':');
     s.add(`${parts[0]}:${parts[1]}`);
@@ -313,6 +350,21 @@ function _derivePendingProductTypes() {
     s.add(`${parts[0]}:${parts[1]}`);
   }
   return s;
+}
+
+function _cancelProductType(pt) {
+  const keyPrefix = `${pt}:`;
+
+  _queue = _queue.filter((job) => {
+    const jobPt = `${job.productId}:${job.type}`;
+    if (jobPt !== pt) return true;
+    _pendingKeys.delete(job.key);
+    return false;
+  });
+
+  for (const [key, controller] of _abortControllers) {
+    if (key.startsWith(keyPrefix)) controller.abort();
+  }
 }
 
 function _removeEntry(key) {
@@ -383,8 +435,9 @@ function reclaimDiskSpace(requiredBytes) {
       const parts = key.split(':');
       const pt = `${parts[0]}:${parts[1]}`;
       const best = latest.get(pt);
-      if (best && key !== best.key && _removeEntry(key)) {
-        freed += _manifest[key] ? (_manifest[key].size || 0) : 0; // already deleted by _removeEntry
+      if (best && key !== best.key) {
+        const oldSize = _manifest[key] ? (_manifest[key].size || 0) : 0;
+        if (_removeEntry(key)) freed += oldSize;
       }
     }
   }
@@ -585,6 +638,11 @@ function fetchWithRedirects(url, redirectCount, signal) {
       resolve({ response: res, contentType });
     });
 
+    // Inactivity timeout: if no bytes received in DOWNLOAD_TIMEOUT_MS, abort
+    req.setTimeout(DOWNLOAD_TIMEOUT_MS, () => {
+      req.destroy(Object.assign(new Error('Download inactivity timeout'), { code: 'ETIMEDOUT' }));
+    });
+
     req.on('error', (err) => {
       if (err.name === 'AbortError') {
         reject(Object.assign(new Error('Download aborted'), { name: 'AbortError', aborted: true }));
@@ -640,68 +698,71 @@ async function _processJob(job) {
     _reservedDownloadBytes += expectedBytes;
     reservationHeld = true;
 
-    const ext = '.jpg';
-    const fileName = `${productId}_${type}_${sk}${ext}`;
-    const destPath = path.join(getCacheDir(), fileName);
+    // Total timeout for the entire job (60s)
+    const JOB_TIMEOUT_MS = 60_000;
+    const jobTimeout = setTimeout(() => controller.abort(), JOB_TIMEOUT_MS);
+    if (jobTimeout.unref) jobTimeout.unref();
 
-    const { contentType, size } = await downloadFile(sourceUrl, destPath, controller.signal);
-    const actualExt = getExtension(contentType);
+    try {
+      const ext = '.jpg';
+      const fileName = `${productId}_${type}_${sk}${ext}`;
+      const destPath = path.join(getCacheDir(), fileName);
 
-    let finalFileName = fileName;
-    if (actualExt !== ext) {
-      finalFileName = `${productId}_${type}_${sk}${actualExt}`;
-      const newPath = path.join(getCacheDir(), finalFileName);
-      if (destPath !== newPath) fs.renameSync(destPath, newPath);
+      const { contentType, size } = await downloadFile(sourceUrl, destPath, controller.signal);
+      const actualExt = getExtension(contentType);
+
+      let finalFileName = fileName;
+      if (actualExt !== ext) {
+        finalFileName = `${productId}_${type}_${sk}${actualExt}`;
+        const newPath = path.join(getCacheDir(), finalFileName);
+        if (destPath !== newPath) fs.renameSync(destPath, newPath);
+      }
+
+      // Race check: only publish if still the desired version
+      if (_desiredKeys.get(pt) !== key) {
+        try { const fp = path.join(getCacheDir(), finalFileName); if (fs.existsSync(fp)) fs.unlinkSync(fp); } catch (_) {}
+        console.log(`[IMAGE-CACHE] Discarded stale download #${productId} ${type}`);
+        return;
+      }
+
+      // Publish: add to manifest first, persist, THEN remove old versions
+      _manifest[key] = {
+        sourceKey: sk,
+        normalizedSourceUrl: normalizeSourceUrl(sourceUrl),
+        versionHint: versionHint || '',
+        revisionCreatedAt: Date.now(),
+        fileName: finalFileName,
+        contentType,
+        size,
+        lastAccessedAt: null,
+      };
+      markManifestDirty();
+
+      if (!saveManifest(true)) {
+        try { const fp = path.join(getCacheDir(), finalFileName); if (fs.existsSync(fp)) fs.unlinkSync(fp); } catch (_) {}
+        delete _manifest[key];
+        throw Object.assign(new Error('Disk full — manifest save failed'), { code: 'ENOSPC', diskFull: true });
+      }
+
+      // Now safe to remove old versions via _removeEntry
+      const prefix = `${productId}:${type}:`;
+      const oldKeys = Object.keys(_manifest).filter(k => k.startsWith(prefix) && k !== key);
+      for (const ok of oldKeys) _removeEntry(ok);
+
+      console.log(`[IMAGE-CACHE] Downloaded #${productId} ${type} (${size} bytes, ${Date.now() - startTime}ms)`);
+    } finally {
+      clearTimeout(jobTimeout);
     }
-
-    // Race check: only publish if still the desired version
-    if (_desiredKeys.get(pt) !== key) {
-      try { const fp = path.join(getCacheDir(), finalFileName); if (fs.existsSync(fp)) fs.unlinkSync(fp); } catch (_) {}
-      console.log(`[IMAGE-CACHE] Discarded stale download #${productId} ${type}`);
-      return;
-    }
-
-    // Publish: add to manifest first, persist, THEN remove old versions
-    _manifest[key] = {
-      sourceKey: sk,
-      normalizedSourceUrl: normalizeSourceUrl(sourceUrl),
-      versionHint: versionHint || '',
-      revisionCreatedAt: Date.now(),
-      fileName: finalFileName,
-      contentType,
-      size,
-      lastAccessedAt: null,
-    };
-    markManifestDirty();
-
-    if (!saveManifest(true)) {
-      // Manifest save failed (ENOSPC) — keep old version, discard new file
-      try { const fp = path.join(getCacheDir(), finalFileName); if (fs.existsSync(fp)) fs.unlinkSync(fp); } catch (_) {}
-      delete _manifest[key];
-      throw Object.assign(new Error('Disk full — manifest save failed'), { code: 'ENOSPC', diskFull: true });
-    }
-
-    // Now safe to remove old versions
-    const prefix = `${productId}:${type}:`;
-    const oldKeys = Object.keys(_manifest).filter(k => k.startsWith(prefix) && k !== key);
-    for (const ok of oldKeys) {
-      const oldEntry = _manifest[ok];
-      try {
-        const oldPath = path.join(getCacheDir(), oldEntry.fileName);
-        if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
-      } catch (_) {}
-      delete _manifest[ok];
-    }
-    if (oldKeys.length > 0) markManifestDirty();
-
-    console.log(`[IMAGE-CACHE] Downloaded #${productId} ${type} (${size} bytes, ${Date.now() - startTime}ms)`);
   } catch (err) {
     if (err.diskFull) {
       reclaimDiskSpace(expectedBytes);
-      if (!canDownload(expectedBytes)) {
+      if (_desiredKeys.get(pt) === key && !_shuttingDown) {
+        job.diskRetryCount = (job.diskRetryCount || 0) + 1;
         _queue.unshift(job);
         requeued = true;
-        suspendQueue('disk-full');
+        if (!canDownload(expectedBytes) || job.diskRetryCount >= 2) {
+          suspendQueue('disk-full');
+        }
       }
       console.warn(`[IMAGE-CACHE] Disk full — #${productId} ${type} ${requeued ? 'requeued' : 'deferred'}`);
     } else if (err.aborted) {
@@ -721,18 +782,24 @@ async function _processJob(job) {
 
     // Flush manifest when queue is idle
     if (_running === 0 && _queue.length === 0 && _manifestDirty) {
-      _doManifestFlush();
+      doManifestFlush();
     }
     processQueue();
   }
 }
 
-function enqueue(productId, type, sourceUrl, versionHint) {
+function enqueue(productId, type, sourceUrl, versionHint = '', { setDesired = true, force = false } = {}) {
   if (!_initialized || _disabled || _shuttingDown) return;
   if (!sourceUrl) return;
+
   const key = cacheKey(productId, type, sourceUrl, versionHint);
   if (!key || _pendingKeys.has(key) || _activeDownloads.has(key)) return;
-  if (hasLocalVersion(productId, type, sourceUrl)) return;
+
+  const pt = `${productId}:${type}`;
+  if (setDesired) _desiredKeys.set(pt, key);
+
+  const cachedEntry = _manifest[key];
+  if (!force && cachedEntry && entryFileExists(cachedEntry)) return;
 
   _pendingKeys.add(key);
   _queue.push({ productId, type, sourceUrl, key, versionHint });
@@ -751,63 +818,64 @@ function invalidateAndEnqueueProduct(product) {
 
   const versionHint = product.imageVersion || product.imageUpdatedAt || Date.now().toString(36);
 
-  const types = [];
-  if (product.imageUrl) types.push({ type: 'image', url: product.imageUrl });
-  if (product.thumbnailUrl) types.push({ type: 'thumbnail', url: product.thumbnailUrl });
-
-  for (const { type, url } of types) {
-    const sk = computeSourceKey(url, versionHint);
-    const key = `${product.id}:${type}:${sk}`;
-    const pt = `${product.id}:${type}`;
-
-    _desiredKeys.set(pt, key);
-
-    if (_pendingKeys.has(key) || _activeDownloads.has(key)) continue;
-
-    _pendingKeys.add(key);
-    _queue.push({ productId: product.id, type, sourceUrl: url, key, versionHint });
+  if (product.imageUrl) {
+    enqueue(product.id, 'image', product.imageUrl, versionHint, { setDesired: true, force: true });
   }
-
-  processQueue();
+  if (product.thumbnailUrl) {
+    enqueue(product.id, 'thumbnail', product.thumbnailUrl, versionHint, { setDesired: true, force: true });
+  }
 }
 
 // ── Reconcile (sync / login) ───────────────────────────────
 
 function reconcileProducts(products) {
   if (!_initialized || _disabled || _shuttingDown) return;
-  if (!Array.isArray(products) || products.length === 0) return;
+  if (!Array.isArray(products)) return;
 
   const activeCacheKeys = new Set();
+  const nextDesiredPt = new Set();
 
   for (const p of products) {
     if (!p || !p.id) continue;
-    _reconcileOneType(p, 'image', p.imageUrl || p.ImageUrl || p.image_url, activeCacheKeys);
-    _reconcileOneType(p, 'thumbnail', p.thumbnailUrl || p.ThumbnailUrl || p.thumbnail_url, activeCacheKeys);
+    _reconcileOneType(p, 'image', p.imageUrl || p.ImageUrl || p.image_url, activeCacheKeys, nextDesiredPt);
+    _reconcileOneType(p, 'thumbnail', p.thumbnailUrl || p.ThumbnailUrl || p.thumbnail_url, activeCacheKeys, nextDesiredPt);
+  }
+
+  // Podar _desiredKeys para productos que ya no estan en el catalogo
+  for (const pt of [..._desiredKeys.keys()]) {
+    if (!nextDesiredPt.has(pt)) {
+      _cancelProductType(pt);
+      _desiredKeys.delete(pt);
+    }
   }
 
   setImmediate(() => clearOrphans(activeCacheKeys));
   tryResume();
 }
 
-function _reconcileOneType(product, type, sourceUrl, activeCacheKeys) {
+function _reconcileOneType(product, type, sourceUrl, activeCacheKeys, nextDesiredPt) {
   if (!sourceUrl) return;
   const normalized = normalizeSourceUrl(sourceUrl);
+  const pt = `${product.id}:${type}`;
+  nextDesiredPt.add(pt);
 
-  // If an entry already exists with matching normalizedSourceUrl, reuse its key
-  const existing = findEntryByNormalizedUrl(product.id, type, normalized);
-  if (existing && entryFileExists(existing)) {
+  // If a valid entry already exists with matching normalizedSourceUrl, reuse its key
+  const existing = findEntryByNormalizedUrlValid(product.id, type, normalized);
+  if (existing) {
     activeCacheKeys.add(existing.key);
-    _desiredKeys.set(`${product.id}:${type}`, existing.key);
+    _desiredKeys.set(pt, existing.key);
     return;
   }
 
   // Compute fresh key without versionHint
   const key = cacheKey(product.id, type, sourceUrl);
   activeCacheKeys.add(key);
-  _desiredKeys.set(`${product.id}:${type}`, key);
+  _desiredKeys.set(pt, key);
 
-  if (!hasLocalVersion(product.id, type, sourceUrl)) {
-    enqueue(product.id, type, sourceUrl);
+  // Only enqueue if not already cached (setDesired=false: already set above)
+  const cachedEntry = _manifest[key];
+  if (!cachedEntry || !entryFileExists(cachedEntry)) {
+    enqueue(product.id, type, sourceUrl, '', { setDesired: false, force: false });
   }
 }
 
@@ -875,7 +943,17 @@ function serveRequest(req, res, productId, type) {
       'Cache-Control': 'private, no-cache',
       'X-Content-Type-Options': 'nosniff',
     });
-    fs.createReadStream(filePath).pipe(res);
+    const stream = fs.createReadStream(filePath);
+    stream.on('error', (err) => {
+      console.error('[IMAGE-CACHE] Read error:', err.message);
+      if (!res.headersSent) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('Not Found');
+      } else {
+        res.destroy(err);
+      }
+    });
+    stream.pipe(res);
   } catch (err) {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not Found');
@@ -894,8 +972,8 @@ function getLocalUrl(productId, type, sourceUrl) {
   }
 
   // Fallback: any valid entry for this product:type
-  const fallback = findLatestEntry(productId, type);
-  if (fallback && entryFileExists(fallback)) {
+  const fallback = findLatestValidEntry(productId, type);
+  if (fallback) {
     return buildLocalUrl(productId, type, fallback.sourceKey);
   }
 
@@ -1042,6 +1120,15 @@ async function shutdown() {
   const drainStart = Date.now();
   while (_running > 0 && Date.now() - drainStart < SHUTDOWN_DRAIN_MS) {
     await new Promise(r => setTimeout(r, 100));
+  }
+
+  // Cancel any manifest flush timer that may have been scheduled during drain
+  if (_manifestFlushTimer) { clearTimeout(_manifestFlushTimer); _manifestFlushTimer = null; }
+
+  if (_running > 0) {
+    console.warn(`[IMAGE-CACHE] Shutdown timeout: ${_running} downloads still active`);
+    saveManifest(true);
+    return;
   }
 
   _activeTempPaths.clear();
