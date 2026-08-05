@@ -748,10 +748,12 @@ function buildMenu() {
             const lastSync = db.get("SELECT value FROM app_config WHERE key = 'last_product_sync'");
             const userCount = db.get("SELECT COUNT(*) as cnt FROM users");
             const imgStats = imageCache.getStats();
-            const imageLine = imgStats
-              ? `Imagenes locales: ${imgStats.fileCount} (${imgStats.imageCount} full + ${imgStats.thumbnailCount} mini, ${imgStats.totalMB} MB / ${imgStats.cacheLimitMB} MB)${imgStats.suspended ? ' ⚠ PAUSADO' : ''}\n` +
-                `Espacio libre disco: ${imgStats.freeDiskGB} GB`
-              : 'Imagenes locales: N/A';
+            const imageLine = !imgStats
+              ? 'Imagenes locales: N/A'
+              : imgStats.disabled
+                ? 'Imagenes locales: DESHABILITADO (fallo al iniciar)'
+                : `Imagenes locales: ${imgStats.fileCount} (${imgStats.imageCount} full + ${imgStats.thumbnailCount} mini, ${imgStats.totalMB} MB / ${imgStats.cacheLimitMB} MB)${imgStats.suspended ? ' ⚠ PAUSADO' : ''}\n` +
+                  `Espacio libre disco: ${imgStats.freeDiskGB} GB`;
             dialog.showMessageBox({
               type: 'info',
               title: 'Estado Offline',
@@ -928,8 +930,8 @@ app.on('window-all-closed', async () => {
     db.run("UPDATE users SET last_token = NULL"); // A10: que el login offline no reuse el token tras cerrar la app
     db.save();
   } catch { /* best-effort */ }
-  imageCache.shutdown();
-  stopLocalServer();
+  await imageCache.shutdown();
+  await stopLocalServer();
   closeDatabase();
   app.quit();
 });

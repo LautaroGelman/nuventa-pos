@@ -423,7 +423,7 @@ async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false }
             image.imageUrl || null, image.thumbnailUrl || null, productId,
           ]);
           db.save();
-          imageCache.enqueueProduct({
+          imageCache.invalidateAndEnqueueProduct({
             id: productId,
             imageUrl: image.imageUrl || null,
             thumbnailUrl: image.thumbnailUrl || null,
