@@ -37,6 +37,10 @@
 - `forceSync()` ([:121](../src/main/sync-service.js#L121)) dispara un tick inmediato (lo usan el
   botón de sync manual y el menú "Forzar sincronización").
 - Guard de reentrada: `_running` evita ticks solapados.
+- Guard de sucursal: si falta un `sucursalId` positivo (caso propietario antes de elegir), el tick
+  informa `waitingForBranch` y no sube ni descarga datos. Nunca se generan rutas con `undefined`.
+- Si cambia la sucursal durante un tick, `authEpoch` aborta el resto y se encola un ciclo inmediato
+  para la nueva sucursal.
 
 ## 3. Anatomía de un tick
 
@@ -78,23 +82,37 @@ Cada uploader transforma filas snake_case en el payload camelCase que espera el 
 | cajas (bajada) | `…/registers?onlyActive=false` | `listRegisters` |
 
 ### Detalles que importan
+- **Ventas y caja**: el payload incluye `clientSessionUuid` y `cashRegisterId`. Para compatibilidad
+  con ventas creadas por builds viejos, si `sales.cash_register_id` está vacío se recupera la caja
+  desde la `cash_session` local asociada; sin ese dato el backend no puede autoabrir la sesión cloud.
 - **Sesiones de caja**: solo se suben las `CLOSED`. La nube no acepta "crear una sesión ya
   cerrada", así que el uploader la **abre y luego la cierra** con los conteos registrados
   ([:382](../src/main/sync-service.js#L382)).
+  Si la apertura fue confirmada online, el POS ya guarda `cloud_id`: al cerrar omite una nueva
+  apertura y cierra exactamente esa sesión cloud. Si se abrió offline, conserva el UUID para que
+  el alta posterior sea idempotente.
+  Al consultar la sesión actual con conectividad, el POS la reconcilia primero con la nube y
+  siempre limita la sesión local por `client_id`, `sucursal_id` y `employee_id`; una fila residual
+  de otro cajero no habilita ventas ni cierre.
 - **Devoluciones**: necesitan el `cloud_id` de la venta original. Si la venta aún no se subió, la
   devolución se **difiere** al próximo ciclo ([:258](../src/main/sync-service.js#L258)). Por eso el
   orden importa: ventas antes que devoluciones.
+
+- Una devolución local nace con `fiscal_status=PENDING_SYNC`. Al subirla se guardan el estado,
+  número, CAE y mensaje de `fiscalDocument` devuelto por el backend. El `cloud_id` se toma de
+  `saleReturnId` (con compatibilidad para respuestas legacy con `id`). Los ciclos posteriores
+  refrescan estados `PENDING`/`WAITING_ORIGINAL`, para incorporar el CAE que ARCA autorice luego.
 - **Descarga de catálogo**: reemplaza, no mergea. Marca todo `active=0` y reactiva lo que llega.
   Actualiza `app_config.last_product_sync`.
 
 ## 6. Resolución de conflictos
 
 Tras subir un registro:
-- **Éxito** → `sync_status='synced'`, guarda `cloud_id`, limpia `sync_error`.
-- **409 / 400** (el registro ya existe en la nube o es inválido de forma recuperable) → se marca
-  `synced` con `sync_error='conflict-resolved'` y se cuenta como sincronizado. La idea es **no
-  reintentar para siempre** un registro que la nube ya tiene.
-- **Otro error** → guarda el mensaje en `sync_error` (el registro sigue `pending` y reintenta).
+- **Éxito 2xx** → `sync_status='synced'`, guarda `cloud_id`, limpia `sync_error`.
+- **4xx permanente** → `sync_status='needs_review'`; no se considera sincronizado. En ventas, al
+  producirse esta transición se reintegra el stock local porque la nube no procesó la operación.
+- **Error transitorio** → guarda el mensaje en `sync_error`, mantiene `pending` y reintenta hasta
+  el límite configurado; luego pasa a `needs_review`.
 
 Para sesiones, también se trata como conflicto el mensaje "ya tiene una sesión abierta"
 ([:412](../src/main/sync-service.js#L412)).

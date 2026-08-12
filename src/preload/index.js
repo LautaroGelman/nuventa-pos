@@ -46,6 +46,8 @@ contextBridge.exposeInMainWorld('nuventaAuth', {
   // Offline login (used only by the fallback page when web is unreachable)
   offlineLogin: (email, password) => ipcRenderer.invoke('auth:offline-login', email, password),
   logout: () => ipcRenderer.invoke('auth:logout'),
+  // Owners select their active branch in AuthContext; main needs the same value for background sync.
+  setActiveBranch: (sucursalId) => ipcRenderer.invoke('auth:set-active-branch', sucursalId),
   onLoginStatus: (callback) => {
     const handler = (_event, data) => callback(data);
     ipcRenderer.on('auth:login-status', handler);

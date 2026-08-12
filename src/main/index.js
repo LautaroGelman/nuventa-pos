@@ -26,6 +26,7 @@ let onlineCheckTimer = null;
 let tokenWatcherTimer = null;
 let lastKnownToken = null;
 let loggedOut = false; // set on logout to block token re-injection on next page load
+let sessionRevocationInProgress = false;
 
 // ── Enlarge cache ────────────────────────────────────────
 app.commandLine.appendSwitch('disk-cache-size', '524288000'); // 500 MB
@@ -48,6 +49,52 @@ function parseJwt(token) {
     const base64 = token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
     return JSON.parse(Buffer.from(base64, 'base64').toString('utf-8'));
   } catch { return null; }
+}
+
+function normalizePositiveId(value) {
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function persistedBranchForClient(clientId) {
+  const normalizedClientId = normalizePositiveId(clientId);
+  if (!normalizedClientId) return null;
+  try {
+    const db = getDb();
+    const storedClient = normalizePositiveId(db.get("SELECT value FROM app_config WHERE key = 'client_id'")?.value);
+    const storedBranch = normalizePositiveId(db.get("SELECT value FROM app_config WHERE key = 'sucursal_id'")?.value);
+    return storedClient === normalizedClientId ? storedBranch : null;
+  } catch {
+    return null;
+  }
+}
+
+async function applyActiveBranch(value) {
+  const sucursalId = normalizePositiveId(value);
+  const clientId = normalizePositiveId(apiClient.clientId);
+  if (!apiClient.token || !clientId) {
+    return { success: false, error: 'No hay una sesión autenticada.' };
+  }
+
+  apiClient.setActiveBranch(sucursalId);
+  const db = getDb();
+  db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('sucursal_id', ?)", [String(sucursalId || '')]);
+
+  const jwt = parseJwt(apiClient.token);
+  if (jwt?.sub) {
+    db.run('UPDATE users SET sucursal_id = ? WHERE lower(email) = lower(?) AND client_id = ?',
+      [sucursalId, jwt.sub, clientId]);
+  }
+  db.save();
+
+  if (!sucursalId) {
+    console.log('[AUTH] Sucursal activa pendiente de selección');
+    return { success: true, sucursalId: null };
+  }
+
+  console.log(`[AUTH] Sucursal activa actualizada: ${sucursalId}`);
+  if (syncService) await syncService.forceSync();
+  return { success: true, sucursalId };
 }
 
 // ── D03/D04/D05: confianza de orígenes (navegación, window.open, IPC) ──
@@ -129,6 +176,18 @@ function clearLocalToken() {
 async function checkOnlineStatus() {
   try {
     const backendUrl = getEffectiveBackendUrl();
+
+    // Si hay una sesión iniciada, este chequeo de 30 segundos también funciona como heartbeat
+    // autenticado. Va directo a la nube mediante apiClient (no pasa por el servidor local), por lo
+    // que puede detectar una sesión reemplazada aunque la pantalla sólo esté leyendo desde SQLite.
+    if (apiClient.token) {
+      apiClient.setBaseUrl(backendUrl);
+      const online = await apiClient.isOnline();
+      isOffline = !online;
+      return online;
+    }
+
+    // Sin token sólo comprobamos conectividad; un 401 en este caso significa que el servidor está vivo.
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 5000);
     const res = await fetch(`${backendUrl}/api/auth/session-status`, {
@@ -146,6 +205,7 @@ async function checkOnlineStatus() {
 
 function startOnlineCheck() {
   if (onlineCheckTimer) return;
+  // La comprobación autenticada no depende del sync ni de que la UI haga una petición remota.
   onlineCheckTimer = setInterval(checkOnlineStatus, 30000);
 }
 
@@ -278,13 +338,14 @@ async function handleTokenCaptured(token) {
     }
   } catch { /* db not ready — first run */ }
 
-  console.log(`[TOKEN] User: ${jwt.sub}, Client: ${jwt.clientId}, Sucursal: ${jwt.sucursalId}`);
+  const activeBranchId = normalizePositiveId(jwt.sucursalId) || persistedBranchForClient(jwt.clientId);
+  console.log(`[TOKEN] User: ${jwt.sub}, Client: ${jwt.clientId}, Sucursal: ${activeBranchId || 'pendiente'}`);
 
   // Configure API client for sync service
   apiClient.setAuth({
     token,
     clientId: jwt.clientId,
-    sucursalId: jwt.sucursalId,
+    sucursalId: activeBranchId,
     employeeId: jwt.employeeId,
   });
 
@@ -299,7 +360,7 @@ async function handleTokenCaptured(token) {
     );
     set('auth_token', encryptToken(token));
     set('client_id', String(jwt.clientId || ''));
-    set('sucursal_id', String(jwt.sucursalId || ''));
+    set('sucursal_id', String(activeBranchId || ''));
     set('employee_id', String(jwt.employeeId || ''));
     // R4-#37: persistir TAMBIÉN los roles del JWT actual. Antes el login web NO escribía 'roles', así
     // que el local-server leía un valor stale de un usuario anterior (un CAJERO podía heredar
@@ -317,7 +378,7 @@ async function handleTokenCaptured(token) {
         employee_name = ?5, client_name = ?6,
         last_token = ?7, last_login_at = ?8, last_online_at = ?9
     `, [
-      jwt.sub || '', jwt.clientId || null, jwt.sucursalId || null,
+      jwt.sub || '', jwt.clientId || null, activeBranchId,
       jwt.employeeId || null, jwt.employeeName || '', jwt.clientName || '',
       encryptToken(token), now, now,
     ]);
@@ -335,23 +396,23 @@ async function handleTokenCaptured(token) {
 
   // Download branch data on first login for this branch
   try {
-    if (jwt.sucursalId) {
+    if (activeBranchId) {
       const db = getDb();
       const branchStatus = db.get(
         'SELECT * FROM branch_data_status WHERE sucursal_id = ?',
-        [jwt.sucursalId]
+        [activeBranchId]
       );
       if (!branchStatus || !branchStatus.full_sync_completed) {
         console.log('[TOKEN] First login for this branch — downloading data...');
         await authService._downloadBranchData(
-          jwt.sucursalId, jwt.clientId,
+          activeBranchId, jwt.clientId,
           (status) => console.log(`[SYNC] ${status.message}`)
         );
         db.run(`
           INSERT INTO branch_data_status (sucursal_id, client_id, full_sync_completed)
           VALUES (?, ?, 1)
           ON CONFLICT(sucursal_id) DO UPDATE SET client_id = ?, full_sync_completed = 1
-        `, [jwt.sucursalId, jwt.clientId, jwt.clientId]);
+        `, [activeBranchId, jwt.clientId, jwt.clientId]);
         db.save();
         console.log('[TOKEN] Branch data downloaded');
       }
@@ -452,6 +513,16 @@ function registerIpcHandlers() {
     loggedOut = true;
     clearLocalToken(); // wipes DB token + stops sync
     return true;
+  });
+
+  ipcMain.handle('auth:set-active-branch', async (event, sucursalId) => {
+    if (!isTrustedSender(event)) return { success: false, error: 'Origen no autorizado.' }; // D05
+    try {
+      return await applyActiveBranch(sucursalId);
+    } catch (err) {
+      console.error('[AUTH] No se pudo actualizar la sucursal activa:', err.message);
+      return { success: false, error: 'No se pudo activar la sucursal seleccionada.' };
+    }
   });
 
   // ── Sync IPC ─────────────────────────────────────────
@@ -753,7 +824,10 @@ function buildMenu() {
               : imgStats.disabled
                 ? 'Imagenes locales: DESHABILITADO (fallo al iniciar)'
                 : `Imagenes locales: ${imgStats.fileCount} (${imgStats.imageCount} full + ${imgStats.thumbnailCount} mini, ${imgStats.totalMB} MB / ${imgStats.cacheLimitMB} MB)${imgStats.suspended ? ' ⚠ PAUSADO' : ''}\n` +
-                  `Espacio libre disco: ${imgStats.freeDiskGB} GB`;
+                  `Cola: ${imgStats.pendingJobs} pendientes, ${imgStats.activeDownloads} activas, ${imgStats.delayedJobs} demoradas, ${imgStats.failedJobs} fallidas\n` +
+                  `Recuperadas: ${imgStats.recoveredFiles} · Espacio libre: ${imgStats.freeDiskGB} GB` +
+                  (imgStats.suspensionReason ? `\nMotivo de pausa: ${imgStats.suspensionReason}` : '') +
+                  (imgStats.lastError ? `\nÚltimo error: ${imgStats.lastError.message}` : '');
             dialog.showMessageBox({
               type: 'info',
               title: 'Estado Offline',
@@ -834,6 +908,7 @@ app.whenReady().then(async () => {
   });
 
   loginEvents.on('login-success', (result) => {
+    sessionRevocationInProgress = false;
     console.log(`[MAIN] Login: ${result.user?.email} (offline=${result.isOffline})`);
     // apiClient was already configured by authService inside the login flow.
     // Start background sync only when we are online.
@@ -842,19 +917,36 @@ app.whenReady().then(async () => {
     }
   });
 
-  // R7-#16: la nube respondió 401 (sesión revocada: empleado dado de baja, suscripción
+  // R7-#16: la nube rechazó la autenticación (sesión revocada: empleado dado de baja, suscripción
   // suspendida, sesión reemplazada). proxyToCloud ya seteó el flag cloud_session_revoked y
   // emitió este evento, pero antes nadie lo consumía: la UI seguía cargada e interactiva.
   // Ahora forzamos el logout y redirigimos a /login, igual que el "Cerrar sesión" del menú.
-  loginEvents.on('session-revoked', (info) => {
+  loginEvents.on('session-revoked', async (info) => {
+    if (sessionRevocationInProgress) return;
+    sessionRevocationInProgress = true;
     console.warn(`[MAIN] Sesión revocada por la nube (${info?.reason}); forzando logout`);
     loggedOut = true;
     clearLocalToken(); // borra token DB + detiene sync
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.executeJavaScript(
-        "sessionStorage.removeItem('token'); window.location.href = '/login';",
-        true
-      ).catch(() => {});
+      try {
+        await dialog.showMessageBox(mainWindow, {
+          type: 'warning',
+          title: 'Sesión cerrada',
+          message: 'Tu sesión se cerró porque la cuenta se inició en otro dispositivo.',
+          detail: 'Por seguridad, este dispositivo fue desconectado. Volvé a iniciar sesión para continuar.',
+          buttons: ['Volver a iniciar sesión'],
+          defaultId: 0,
+          cancelId: 0,
+          noLink: true,
+        });
+      } catch (_) { /* si el diálogo no puede mostrarse, redirigir igualmente */ }
+
+      if (!mainWindow.isDestroyed()) {
+        await mainWindow.webContents.executeJavaScript(
+          "sessionStorage.removeItem('token'); window.location.href = '/login';",
+          true
+        ).catch(() => {});
+      }
     }
   });
 
@@ -888,8 +980,8 @@ app.whenReady().then(async () => {
       apiClient.setAuth({
         token: decryptToken(token.value),
         clientId: Number(clientId.value),
-        sucursalId: Number(sucursalId.value),
-        employeeId: Number(employeeId.value),
+        sucursalId: normalizePositiveId(sucursalId?.value),
+        employeeId: normalizePositiveId(employeeId?.value),
       });
     }
   } catch { /* ignore */ }

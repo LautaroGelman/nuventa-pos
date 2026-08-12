@@ -76,6 +76,7 @@ nuventa-pos/
 │   │   ├── index.js          # Ciclo de vida, ventana, intercepción /api/*, token watcher, IPC
 │   │   ├── local-server.js   # Servidor HTTP local: estáticos + REST↔SQLite + proxy a la nube
 │   │   ├── sync-service.js   # Sincronización en background (sube pendientes, baja catálogo)
+│   │   ├── image-cache.js    # Caché offline versionado de imágenes de productos
 │   │   ├── auth-service.js   # Login local-first con fallback remoto, gracia offline 7 días
 │   │   ├── database.js       # SQLite (sql.js/WASM): schema, migraciones, helpers
 │   │   ├── api-client.js     # Cliente HTTP hacia la API cloud
@@ -150,6 +151,7 @@ El archivo [CLAUDE.md](CLAUDE.md) es el punto de entrada. Documentación técnic
 |----------------------|-----------|
 | `nuventa-pos.db` | Base de datos SQLite (catálogo, ventas, caja, usuarios, sync). |
 | `nuventa-pos-config.json` | Config de la app (tamaño de ventana). Las URLs se derivan del entorno, no se persisten. |
+| `cache/product-images/` | Imágenes de inventario para uso offline y su `manifest.json` atómico. |
 
 > En Windows `userData` ≈ `%APPDATA%/nuventa-pos`. El `auth_token` se borra al cerrar la app
 > ([index.js:680](src/main/index.js#L680)): hay que volver a iniciar sesión en cada arranque

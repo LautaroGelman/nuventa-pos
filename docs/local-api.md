@@ -86,7 +86,9 @@ DTOs en **camelCase** (forma que espera el frontend). Columnas en snake_case (ve
 
 | Método y ruta | Handler | Comportamiento |
 |---------------|---------|----------------|
-| `POST /api/auth/login` | [:275](../src/main/local-server.js#L275) | Delega en `authService.login` (flujo local-first). Devuelve token, ids, roles, `offlineMode`. Emite `loginEvents`. Ver [authentication.md](authentication.md). |
+| `POST /api/auth/login` | [local-server.js](../src/main/local-server.js) | Delega en `authService.login` (flujo local-first). Devuelve token, ids, roles, `offlineMode`; si el dispositivo es nuevo preserva el HTTP 403 y `requiresDeviceVerification` de la nube. Emite `loginEvents`. Ver [authentication.md](authentication.md). |
+| `POST /api/auth/verify-device` | [local-server.js](../src/main/local-server.js) | Valida el código en la nube y termina el login local (persistencia de credenciales, sesión y descarga inicial). No exige JWT previo. |
+| `POST /api/auth/resend-verification-code` | [local-server.js](../src/main/local-server.js) | Reenvía el código desde la nube. No exige JWT previo. |
 | `GET /api/auth/me` | [:323](../src/main/local-server.js#L323) | Identidad derivada de `app_config`. 401 si no hay token. |
 | `GET /api/auth/session-status` | [:338](../src/main/local-server.js#L338) | `{ active: true }`. Usado como sonda de conexión. |
 | `POST /api/auth/logout` | [:342](../src/main/local-server.js#L342) | No-op (`{}`). El logout real lo maneja `index.js`. |
@@ -103,7 +105,7 @@ DTOs en **camelCase** (forma que espera el frontend). Columnas en snake_case (ve
 
 | Método y ruta | Handler | Comportamiento |
 |---------------|---------|----------------|
-| `POST /sales` | [:404](../src/main/local-server.js#L404) | Crea venta `pending`, inserta `sale_items`/`sale_payments`/`sale_promotion_discounts`, **decrementa stock** (salvo `no_code`), suma a `expected_amount` de la sesión abierta. Responde 201 con `offlineCreated:true`. |
+| `POST /sales` | [local-server.js](../src/main/local-server.js) | Exige un turno abierto con caja válida. Crea venta `pending`, inserta `sale_items`/`sale_payments`/`sale_promotion_discounts`, **decrementa stock** (salvo `no_code`/`weighable`) y suma el efectivo a `expected_amount`. Persiste `cashRegisterId`; si un frontend anterior lo omite, lo hereda de la sesión local abierta para que la nube pueda vincularla al sincronizar. Responde 201 con `offlineCreated:true`. |
 | `GET /sales` | [:495](../src/main/local-server.js#L495) | Ventas de **hoy** (LIMIT 100). |
 
 ### Cajas registradoras
@@ -111,18 +113,19 @@ DTOs en **camelCase** (forma que espera el frontend). Columnas en snake_case (ve
 | Método y ruta | Handler | Comportamiento |
 |---------------|---------|----------------|
 | `GET /registers` (`?onlyActive=`) | [:585](../src/main/local-server.js#L585) | **Cloud-first**: intenta la nube (timeout 8 s) para disponibilidad en tiempo real; si falla, cae al cache local con flag `_offlineWarning:true`. |
+| `GET /registers/availability` (`?onlyActive=`) | `local-server.js` | Consulta el estado autoritativo en la nube al entrar en Ventas. Devuelve ocupación y responsable; offline devuelve el estado local con `availabilityVerified:false`. |
 
 ### Sesiones de caja
 
 | Método y ruta | Handler | Comportamiento |
 |---------------|---------|----------------|
-| `GET /cash-sessions/current` | [:641](../src/main/local-server.js#L641) | Sesión `OPEN` + totales de ventas por método. `null` si no hay. |
+| `GET /cash-sessions/current` | `local-server.js` | **Online-first y scoped** por cliente, sucursal y empleado autenticados. Vincula una apertura offline por UUID; si la nube la rechaza, la aísla como `FORCED_CLOSE/needs_review`. Nunca devuelve el turno de otro cajero. |
 | `GET /cash-sessions/current/preview` | [:664](../src/main/local-server.js#L664) | Alias de `current`. |
 | `GET /cash-sessions/open-preview` (`?cashRegisterId=`) | [:669](../src/main/local-server.js#L669) | Sugiere fondo de apertura (carry-over de la sesión previa o `default_opening_float`). |
-| `POST /cash-sessions/open` | [:707](../src/main/local-server.js#L707) | Abre sesión `OPEN` (rechaza si ya hay una abierta). |
+| `POST /cash-sessions/open` | `local-server.js` | **Online-first**: reserva la caja en la nube con UUID idempotente antes de crear la sesión local. Un rechazo cloud (caja ocupada, otra sesión del empleado o permisos) no crea estado local. Ante una caída real de red conserva la apertura offline. |
 | `POST /cash-sessions/open-with-tracking` | alias [:759](../src/main/local-server.js#L759) | = `open`. |
 | `POST /shift/open` | [:761](../src/main/local-server.js#L761) | = `open`. |
-| `POST /cash-sessions/close` | [:766](../src/main/local-server.js#L766) | Cierra la sesión abierta: setea `counted_amount`, `difference`, `float_left_for_next`, `sync_status='pending'`. |
+| `POST /cash-sessions/close` | `local-server.js` | Cierra exclusivamente la sesión abierta del empleado autenticado: setea `counted_amount`, `difference`, `float_left_for_next`, `sync_status='pending'`. La variante `/:id/close-with-tracking` es idempotente: un retry del mismo ID devuelve el cierre existente y nunca cierra un turno nuevo. |
 | `POST /cash-sessions/:id/close-with-tracking` | alias [:801](../src/main/local-server.js#L801) | = `close`. |
 | `GET /cash-sessions/:id/close-preview` | [:803](../src/main/local-server.js#L803) | Preview de cierre con fórmula de efectivo esperado (apertura + ventas efectivo + inyecciones − retiros/gastos − devoluciones efectivo). `:id` puede ser `current`. |
 | `GET /cash-sessions/history` | [:879](../src/main/local-server.js#L879) | Historial paginado. |
@@ -136,6 +139,7 @@ DTOs en **camelCase** (forma que espera el frontend). Columnas en snake_case (ve
 |---------------|---------|----------------|
 | `POST /returns` | [:1009](../src/main/local-server.js#L1009) | Valida contra la venta original (cantidades), crea `returns` + `return_items` `pending`, **restaura stock**, ajusta `expected_amount` si refund en efectivo. |
 | `GET /returns` (`?saleId=&from=&to=`) | [:1115](../src/main/local-server.js#L1115) | Lista filtrable (LIMIT 100). |
+| `POST /returns/:id/fiscal-document/retry` | `local-server.js` | Propietario/admin: reintenta la NC en la nube y actualiza el estado fiscal local. |
 
 ### Movimientos de caja
 
@@ -182,8 +186,17 @@ propietario, administrador, inventario y multifunción. En el `PUT` conserva el 
 su boundary y reenvía los bytes sin convertirlos a JSON; acepta hasta 2 MB de archivo más un margen
 acotado para el envelope multipart. El límite JSON general de 1 MB no cambia.
 
-Una respuesta exitosa actualiza `image_url` y `thumbnail_url` en SQLite. El POS no descarga ni
-persiste imágenes: con conexión las obtiene desde CloudFront y sin conexión muestra el placeholder.
+Una respuesta exitosa actualiza `image_url` y `thumbnail_url` en SQLite y encola ambas variantes
+en el caché local. El caché conserva archivos raster en `userData/cache/product-images`, usa un
+manifest atómico, limita su tamaño a 1 GB y reserva 1 GB libre en el disco. Las mutaciones de imagen
+requieren conexión; las copias ya descargadas se sirven offline desde
+`/api/local-product-images/{productId}/{image|thumbnail}`. Si cambia la URL, nunca se sirve una
+versión anterior: mientras la nueva no esté disponible se usa la URL CDN o el placeholder.
+
+En desarrollo, las URLs públicas del object storage del backend bajo
+`/api/local-product-images/product-images/{clientId}/{sucursalId}/{productId}/{version}/{filename}`
+se proxifican para cualquier rol. Esto equivale a la lectura pública por CloudFront en producción y
+cubre el instante previo a que el caché offline termine de descargar el objeto.
 
 ## 7. Notas de comportamiento por diseño
 

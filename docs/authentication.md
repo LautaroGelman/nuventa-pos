@@ -55,15 +55,17 @@ La conexión se sondea con `apiClient.isOnline()` (`GET /api/auth/session-status
 | Flag del backend | Significado | Devuelve |
 |------------------|-------------|----------|
 | `emailPending` | Falta confirmar email | `{ emailPending:true }` |
-| `deviceVerificationRequired` | Verificación de dispositivo | `{ deviceVerification:true, email }` |
+| `requiresDeviceVerification` | Verificación de dispositivo | HTTP 403 con el mismo contrato para que el frontend abra el modal del código |
 | `blocked` | Cuenta bloqueada | `{ blocked:true }` |
 
 **409 — sesión activa en otro dispositivo:** `_handleActiveSessionConflict()`
 ([auth-service.js:280](../src/main/auth-service.js#L280)) reintenta automáticamente con
 `forceLogout=true` (cierra la sesión anterior sin preguntar).
 
-> El `api-client` también soporta `verifyDevice`, `resendVerificationCode` (ver
-> [modules.md](modules.md)), pero el flujo de verificación visible lo maneja el frontend web.
+El servidor local expone también `POST /api/auth/verify-device` y
+`POST /api/auth/resend-verification-code` sin exigir un JWT previo, porque son pasos del login. La
+UI visible la maneja el frontend web; al validar correctamente, `auth-service` termina el login,
+guarda las credenciales locales y dispara la descarga inicial de la sucursal.
 
 ## 4. Descarga inicial de la sucursal
 
@@ -89,6 +91,18 @@ Cuando el login ocurre por la **web** (no por la página de fallback), el JWT qu
   4. Arranca el `sync-service` (si hay conexión).
   5. Dispara la descarga inicial de sucursal si falta.
 - **Token desaparece** → `handleTokenCleared()` → detiene el sync.
+
+### Sucursal activa de propietarios
+
+El JWT de un propietario no tiene una sucursal fija. `AuthContext` conserva la elegida en
+`localStorage`, pero el proceso main no puede leer ese storage por el aislamiento de Electron. El
+preload expone `nuventaAuth.setActiveBranch(id)`, que envía la selección por IPC, la persiste en
+`app_config.sucursal_id` y actualiza el `apiClient`. Una selección nueva incrementa `authEpoch`, por
+lo que cualquier sync de la sucursal anterior se aborta antes de continuar.
+
+Al capturar o restaurar un token sin `sucursalId`, el POS reutiliza la última sucursal persistida
+solo cuando pertenece al mismo `clientId`. Hasta recibir una sucursal positiva válida no se
+construyen rutas de negocio ni se ejecuta sincronización.
 
 ### Inyección del token (preload)
 En cada carga de página, el preload lee el token cacheado vía IPC **síncrono**

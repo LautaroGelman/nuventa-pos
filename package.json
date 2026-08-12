@@ -6,6 +6,9 @@
   "scripts": {
     "start": "electron .",
     "start:dev": "electron . --dev",
+    "test": "node --test test/*.test.js",
+    "test:smoke": "node test/run-electron-smoke.js",
+    "check": "node --check src/main/api-client.js && node --check src/main/auth-service.js && node --check src/main/index.js && node --check src/main/sync-service.js && node --check src/main/image-cache.js && node --check src/main/local-server.js && node --test test/*.test.js",
     "build:frontend": "cd ../nuventa-frontend-dev && pnpm build",
     "build:web": "npm run build:frontend && node -e \"const{cpSync,rmSync,mkdirSync}=require('fs');const src='../nuventa-frontend-dev/out';const dst='resources/web';rmSync(dst,{recursive:true,force:true});mkdirSync(dst,{recursive:true});cpSync(src,dst,{recursive:true});console.log('Web assets copied to',dst);\"",
     "build": "npm run build:web && electron-builder --win",

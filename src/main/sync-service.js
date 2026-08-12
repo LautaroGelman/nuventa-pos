@@ -44,6 +44,7 @@ class SyncService extends EventEmitter {
     this._timer      = null;   // main hourly interval
     this._retryTimer = null;   // short retry when offline
     this._running    = false;
+    this._runAgain   = false;  // branch/login changes can request one follow-up cycle
     this._lastOnline = null;   // last observed connectivity (real, not derived from _running)
   }
 
@@ -58,6 +59,7 @@ class SyncService extends EventEmitter {
   stop() {
     if (this._timer)      { clearInterval(this._timer);      this._timer      = null; }
     if (this._retryTimer) { clearTimeout(this._retryTimer);  this._retryTimer = null; }
+    this._runAgain = false;
     console.log('[SYNC] Service stopped');
   }
 
@@ -107,6 +109,15 @@ class SyncService extends EventEmitter {
         return;
       }
 
+      // Owners choose a branch in the frontend because their JWT intentionally has no
+      // sucursalId. Never compose cloud routes until that selection reaches the main process.
+      if (!Number.isSafeInteger(Number(apiClient.clientId)) || Number(apiClient.clientId) <= 0 ||
+          !Number.isSafeInteger(Number(apiClient.sucursalId)) || Number(apiClient.sucursalId) <= 0) {
+        console.log('[SYNC] Esperando selección de sucursal activa.');
+        this.emit('sync-status', { online: true, syncing: false, waitingForBranch: true });
+        return;
+      }
+
       // Online — cancel any pending retry; we're connected.
       this._cancelRetry();
 
@@ -144,6 +155,7 @@ class SyncService extends EventEmitter {
       if (stillSameAuth() && apiClient.token) {
         await this._downloadProducts();
         await this._downloadRegisters();
+        await this._refreshReturnFiscalStatuses();
       }
 
       if (!stillSameAuth()) {
@@ -168,6 +180,10 @@ class SyncService extends EventEmitter {
       this._scheduleRetry();
     } finally {
       this._running = false;
+      if (this._runAgain) {
+        this._runAgain = false;
+        setTimeout(() => this._tick(), 0);
+      }
     }
   }
 
@@ -176,6 +192,7 @@ class SyncService extends EventEmitter {
     // instead of silently doing nothing, so the "Forzar sincronización"
     // button always gives feedback.
     if (this._running) {
+      this._runAgain = true;
       this.emit('sync-status', { online: this._lastOnline, syncing: true });
       return;
     }
@@ -250,7 +267,7 @@ class SyncService extends EventEmitter {
         // R4-#9/#28: enviar el uuid de la sesión local para que el backend vincule la venta a UNA sesión
         // cloud idempotente (find-or-create por uuid) en vez de auto-abrir una sesión huérfana por batch.
         const sessRow = sale.cash_session_id
-          ? db.get('SELECT client_session_uuid FROM cash_sessions WHERE id = ?', [sale.cash_session_id])
+          ? db.get('SELECT client_session_uuid, cash_register_id FROM cash_sessions WHERE id = ?', [sale.cash_session_id])
           : null;
 
         const payload = {
@@ -259,7 +276,10 @@ class SyncService extends EventEmitter {
           saleDate: sale.sale_date,
           employeeId: sale.employee_id,
           status: sale.status || 'COMPLETED',
-          cashRegisterId: sale.cash_register_id || undefined,
+          // Defensa para ventas creadas por builds viejos: si la fila de venta no guardó la caja,
+          // recuperarla de la sesión local asociada. Sin este dato el backend no puede auto-abrir
+          // la sesión cloud y rechaza la venta con 409.
+          cashRegisterId: sale.cash_register_id || sessRow?.cash_register_id || undefined,
           items: items.map((i) => ({
             productId: i.product_id,
             quantity: i.quantity,
@@ -411,19 +431,43 @@ class SyncService extends EventEmitter {
         };
 
         const result = await apiClient.createReturn(payload);
+        const fiscal = result.fiscalDocument || {};
+        const cloudReturnId = result.saleReturnId || result.id || null;
 
         db.run(`
           UPDATE returns
           SET sync_status  = 'synced',
               cloud_id     = ?,
               sale_cloud_id = ?,
+              fiscal_status = ?,
+              fiscal_message = ?,
+              fiscal_invoice_id = ?,
+              fiscal_type = ?,
+              fiscal_number = ?,
+              fiscal_cae = ?,
+              fiscal_cae_expiration = ?,
+              fiscal_updated_at = ?,
+              fiscal_retryable = ?,
               synced_at    = datetime('now','localtime'),
               sync_error   = NULL
           WHERE local_id = ?
-        `, [result.id || null, saleCloudId, ret.local_id]);
+        `, [
+          cloudReturnId,
+          saleCloudId,
+          fiscal.status || 'FAILED',
+          fiscal.message || 'La nube no devolvió información fiscal para esta devolución.',
+          fiscal.invoiceId || null,
+          fiscal.type || null,
+          fiscal.number || null,
+          fiscal.cae || null,
+          fiscal.caeExpiration || null,
+          fiscal.updatedAt || null,
+          fiscal.retryable ? 1 : 0,
+          ret.local_id,
+        ]);
 
-        this._log('UPLOAD_RETURN', `local_id=${ret.local_id} → cloud_id=${result.id}`, 'ok');
-        console.log(`[SYNC] Return ${ret.local_id} uploaded → cloud ${result.id}`);
+        this._log('UPLOAD_RETURN', `local_id=${ret.local_id} → cloud_id=${cloudReturnId}`, 'ok');
+        console.log(`[SYNC] Return ${ret.local_id} uploaded → cloud ${cloudReturnId}`);
         synced++;
       } catch (err) {
         // C02: sin marcar 'synced' ante 4xx. Idempotencia (C01) cubre el duplicado real con 2xx.
@@ -435,6 +479,58 @@ class SyncService extends EventEmitter {
   }
 
   // ── Upload pending cash movements ───────────────────
+
+  /** Actualiza NCs que ARCA pudo resolver después de que la devolución ya se sincronizó. */
+  async _refreshReturnFiscalStatuses() {
+    const db = getDb();
+    const pending = db.all(`
+      SELECT cloud_id, return_date
+        FROM returns
+       WHERE sync_status = 'synced'
+         AND fiscal_status IN ('PENDING', 'WAITING_ORIGINAL')
+         AND client_id = ? AND sucursal_id = ?
+         AND cloud_id IS NOT NULL
+    `, [Number(apiClient.clientId), Number(apiClient.sucursalId)]);
+    if (pending.length === 0) return;
+
+    const from = pending
+      .map((row) => String(row.return_date || '').slice(0, 10))
+      .filter(Boolean)
+      .sort()[0];
+    const today = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Argentina/Buenos_Aires',
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(new Date());
+    const params = from ? `from=${encodeURIComponent(from)}&to=${encodeURIComponent(today)}` : '';
+    const cloudReturns = await apiClient.getReturns(params);
+    const pendingIds = new Set(pending.map((row) => Number(row.cloud_id)));
+
+    for (const cloudReturn of Array.isArray(cloudReturns) ? cloudReturns : []) {
+      if (!pendingIds.has(Number(cloudReturn.saleReturnId)) || !cloudReturn.fiscalDocument) continue;
+      const fiscal = cloudReturn.fiscalDocument;
+      db.run(`
+        UPDATE returns
+           SET fiscal_status = ?, fiscal_message = ?, fiscal_invoice_id = ?, fiscal_type = ?,
+               fiscal_number = ?, fiscal_cae = ?, fiscal_cae_expiration = ?,
+               fiscal_updated_at = ?, fiscal_retryable = ?
+         WHERE cloud_id = ? AND client_id = ? AND sucursal_id = ?
+      `, [
+        fiscal.status,
+        fiscal.message || null,
+        fiscal.invoiceId || null,
+        fiscal.type || null,
+        fiscal.number || null,
+        fiscal.cae || null,
+        fiscal.caeExpiration || null,
+        fiscal.updatedAt || null,
+        fiscal.retryable ? 1 : 0,
+        Number(cloudReturn.saleReturnId),
+        Number(apiClient.clientId),
+        Number(apiClient.sucursalId),
+      ]);
+    }
+    db.save();
+  }
 
   async _uploadPendingCashMovements() {
     const db = getDb();
@@ -761,6 +857,8 @@ class SyncService extends EventEmitter {
   // AHORA. Si no, se deja 'pending' (lo subirá el usuario correcto) en vez de cargarlo en otra sucursal
   // /tenant. Filas viejas sin client_id/sucursal_id (null) no se bloquean (compatibilidad).
   _rowMatchesCurrentAuth(row) {
+    if (!Number.isSafeInteger(Number(apiClient.clientId)) || Number(apiClient.clientId) <= 0) return false;
+    if (!Number.isSafeInteger(Number(apiClient.sucursalId)) || Number(apiClient.sucursalId) <= 0) return false;
     if (row.client_id != null && apiClient.clientId != null && Number(row.client_id) !== Number(apiClient.clientId)) return false;
     if (row.sucursal_id != null && apiClient.sucursalId != null && Number(row.sucursal_id) !== Number(apiClient.sucursalId)) return false;
     return true;

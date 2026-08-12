@@ -18,6 +18,17 @@ const imageCache = require('./image-cache');
 // index.js listens on this to: start sync + forward status to renderer
 const loginEvents = new EventEmitter();
 
+// Centraliza los rechazos de autenticación detectados tanto por el proxy como por el sync.
+// El main process consume este evento para limpiar credenciales, avisar y volver al login.
+apiClient.on('session-revoked', (info) => {
+  try {
+    const db = getDb();
+    db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('cloud_session_revoked', '1')");
+    db.save();
+  } catch (_) { /* DB todavía no inicializada o cerrándose */ }
+  loginEvents.emit('session-revoked', info);
+});
+
 // ── C05: timestamps de NEGOCIO (zona Argentina, UTC-3 fijo, sin DST) ──────
 // El backend deserializa saleDate/createdAt/returnDate como LocalDateTime (sin zona). Si el POS
 // mandaba `new Date().toISOString()` (UTC con 'Z'), una venta de las 21:30 ART = 00:30Z del día
@@ -136,7 +147,7 @@ const SECURITY_HEADERS = {
   // necesita en prod) y se acota connect-src al backend Nuventa + loopback (antes `https:` permitía
   // exfiltrar a cualquier host). Se mantiene 'unsafe-inline' en script/style porque el export estático
   // de Next inyecta scripts/estilos inline y no admite nonces sin un build server (follow-up: nonces/hashes).
-  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; font-src 'self' data: https:; connect-src 'self' https://api.nuventa.com.ar https://*.nuventa.com.ar http://127.0.0.1:* http://localhost:*; frame-ancestors 'self'; base-uri 'self'; form-action 'self';",
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; font-src 'self' data: https:; connect-src 'self' https://api.nuventa.com.ar https://*.nuventa.com.ar http://127.0.0.1:* http://localhost:*; frame-ancestors 'self'; base-uri 'self'; form-action 'self';",
 };
 
 function serveStaticFile(urlPath, res) {
@@ -306,6 +317,148 @@ function getConfigVal(db, key) {
   return row ? row.value : null;
 }
 
+function getCurrentCashScope(db) {
+  const clientId = Number(getConfigVal(db, 'client_id'));
+  const sucursalId = Number(getConfigVal(db, 'sucursal_id'));
+  const employeeId = Number(getConfigVal(db, 'employee_id'));
+  if (![clientId, sucursalId, employeeId].every((id) => Number.isSafeInteger(id) && id > 0)) {
+    return null;
+  }
+  return { clientId, sucursalId, employeeId };
+}
+
+/** La sesión local actual siempre pertenece al usuario, cliente y sucursal autenticados. */
+function getScopedOpenCashSession(db) {
+  const scope = getCurrentCashScope(db);
+  if (!scope) return null;
+  return db.get(`
+    SELECT * FROM cash_sessions
+     WHERE status = 'OPEN'
+       AND client_id = ?
+       AND sucursal_id = ?
+       AND employee_id = ?
+     ORDER BY opening_time DESC
+     LIMIT 1
+  `, [scope.clientId, scope.sucursalId, scope.employeeId]);
+}
+
+function getOwnedCashSessionByAnyId(db, sessionId) {
+  const scope = getCurrentCashScope(db);
+  const id = Number(sessionId);
+  if (!scope || !Number.isSafeInteger(id) || id <= 0) return null;
+  return db.get(`
+    SELECT * FROM cash_sessions
+     WHERE (id = ? OR cloud_id = ?)
+       AND client_id = ?
+       AND sucursal_id = ?
+       AND employee_id = ?
+     LIMIT 1
+  `, [id, id, scope.clientId, scope.sucursalId, scope.employeeId]);
+}
+
+/**
+ * Busca un cierre local ya confirmado por el cajero para una sesión cloud.
+ *
+ * El cierre del POS es local-first: entre el POST de cierre y el siguiente ciclo de sync,
+ * la nube todavía puede informar la misma sesión como OPEN. Esa lectura atrasada no debe
+ * volver a crear una fila OPEN ni reactivar el turno que el cajero acaba de cerrar.
+ */
+function getScopedClosedCashSessionByCloudId(db, cloudSessionId) {
+  const scope = getCurrentCashScope(db);
+  const id = Number(cloudSessionId);
+  if (!scope || !Number.isSafeInteger(id) || id <= 0) return null;
+  return db.get(`
+    SELECT * FROM cash_sessions
+     WHERE cloud_id = ?
+       AND client_id = ?
+       AND sucursal_id = ?
+       AND employee_id = ?
+       AND status = 'CLOSED'
+     ORDER BY closing_time ASC, id ASC
+     LIMIT 1
+  `, [id, scope.clientId, scope.sucursalId, scope.employeeId]);
+}
+
+function getScopedClosedCashSessionByAnyId(db, sessionId) {
+  const scope = getCurrentCashScope(db);
+  const id = Number(sessionId);
+  if (!scope || !Number.isSafeInteger(id) || id <= 0) return null;
+  return db.get(`
+    SELECT * FROM cash_sessions
+     WHERE (id = ? OR cloud_id = ?)
+       AND client_id = ?
+       AND sucursal_id = ?
+       AND employee_id = ?
+       AND status = 'CLOSED'
+     ORDER BY closing_time ASC, id ASC
+     LIMIT 1
+  `, [id, id, scope.clientId, scope.sucursalId, scope.employeeId]);
+}
+
+function quarantineLocalCashSession(db, session, reason) {
+  if (!session?.id) return;
+  db.run(`
+    UPDATE cash_sessions
+       SET status = 'FORCED_CLOSE',
+           closing_time = COALESCE(closing_time, ?),
+           sync_status = 'needs_review',
+           sync_error = ?
+     WHERE id = ? AND status = 'OPEN'
+  `, [businessNowIso(), String(reason || 'La sesión local no coincide con la nube.'), session.id]);
+}
+
+function linkOrMirrorCloudCashSession(db, localSession, cloudSession) {
+  const scope = getCurrentCashScope(db);
+  if (!scope || !cloudSession || cloudSession.status !== 'OPEN') return null;
+
+  const sameRegister = localSession
+    && String(localSession.cash_register_id) === String(cloudSession.cashRegisterId);
+  const sameCloudSession = localSession?.cloud_id
+    && String(localSession.cloud_id) === String(cloudSession.id);
+
+  if (localSession && (sameCloudSession || (!localSession.cloud_id && sameRegister))) {
+    db.run(`
+      UPDATE cash_sessions
+         SET cloud_id = ?, cash_register_id = ?, cash_register_name = ?,
+             employee_id = ?, employee_name = ?, sync_error = NULL
+       WHERE id = ?
+    `, [
+      cloudSession.id,
+      cloudSession.cashRegisterId,
+      cloudSession.cashRegisterName || localSession.cash_register_name || null,
+      scope.employeeId,
+      cloudSession.employeeName || getConfigVal(db, 'employee_name') || '',
+      localSession.id,
+    ]);
+    return db.get('SELECT * FROM cash_sessions WHERE id = ?', [localSession.id]);
+  }
+
+  if (localSession) {
+    quarantineLocalCashSession(db, localSession, 'La nube informó una sesión actual diferente.');
+  }
+
+  const openingTime = cloudSession.openingTime || businessNowIso();
+  const result = db.run(`
+    INSERT INTO cash_sessions (cloud_id, client_session_uuid, client_id, sucursal_id,
+      employee_id, employee_name, status, business_date, opening_time,
+      initial_amount, expected_amount, cash_register_id, cash_register_name, sync_status)
+    VALUES (?, NULL, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, 'pending')
+  `, [
+    cloudSession.id,
+    scope.clientId,
+    scope.sucursalId,
+    scope.employeeId,
+    cloudSession.employeeName || getConfigVal(db, 'employee_name') || '',
+    cloudSession.businessDate || String(openingTime).slice(0, 10),
+    openingTime,
+    Number(cloudSession.initialAmount) || 0,
+    Number(cloudSession.expectedAmount) || Number(cloudSession.initialAmount) || 0,
+    cloudSession.cashRegisterId || null,
+    cloudSession.cashRegisterName || null,
+  ]);
+  return db.get('SELECT * FROM cash_sessions WHERE id = ?', [result.lastId]);
+}
+
 // ── Role helpers ─────────────────────────────────────────
 
 // Roles hierarchy: PROPIETARIO > ADMINISTRADOR > MULTIFUNCION > INVENTARIO > CAJERO
@@ -358,7 +511,7 @@ function canManageInventory() {
 // Used for admin/owner routes that don't have local implementations
 // (dashboard, reports, finance, employees, daily-close, etc.)
 
-async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false } = {}) {
+async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false, rawResponse = false } = {}) {
   const db = getDb();
   const rawToken = getConfigVal(db, 'auth_token');
   const token = rawToken ? decryptToken(rawToken) : null;
@@ -380,29 +533,35 @@ async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false }
     fetchOpts.body = rawBody ? body : JSON.stringify(body);
   }
 
+  let timeout = null;
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    timeout = setTimeout(() => controller.abort(), 20000);
     fetchOpts.signal = controller.signal;
 
     const cloudRes = await fetch(cloudUrl, fetchOpts);
     clearTimeout(timeout);
 
-    const responseText = await cloudRes.text();
+    const responseBody = rawResponse
+      ? Buffer.from(await cloudRes.arrayBuffer())
+      : await cloudRes.text();
+    const responseText = rawResponse ? '' : responseBody;
 
-    // A02: un 401 de la NUBE significa que estamos ONLINE pero la sesión/cuenta fue RECHAZADA
-    // (token revocado, sesión reemplazada, empleado dado de baja, suscripción suspendida). NO es un
+    // A02: un rechazo de autenticación de la NUBE significa que estamos ONLINE pero la sesión/cuenta
+    // fue rechazada (token revocado, sesión reemplazada, empleado dado de baja, suscripción suspendida). NO es un
     // corte de red, así que enmascararlo como 503 "offline" dejaba seguir vendiendo hasta 7 días con
     // una sesión revocada. Ahora marcamos la sesión como revocada (bloquea nuevas escrituras locales,
     // ver assertCloudSessionValid) y avisamos al main para forzar el logout. Se sigue respondiendo 503
     // a ESTA request para no disparar el loop del interceptor axios; el bloqueo real lo hace el flag.
-    if (cloudRes.status === 401) {
-      console.warn(`[LOCAL-API] Cloud returned 401 for ${method} ${fullUrl} — sesión revocada`);
-      try {
-        db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('cloud_session_revoked', '1')");
-        db.save();
-      } catch (_) { /* best-effort */ }
-      loginEvents.emit('session-revoked', { reason: 'cloud-401', path: fullUrl });
+    // Spring Security puede responder 403 cuando el JWT es válido pero su sessionId ya fue
+    // invalidado. Como otros 403 sí representan falta de permisos, primero confirmamos el estado
+    // mediante /session-status antes de expulsar al usuario.
+    const authWasRevoked = await apiClient.handleAuthFailure(cloudRes.status, {
+      path: fullUrl,
+      responseBody: responseText,
+    });
+    if (authWasRevoked) {
+      console.warn(`[LOCAL-API] Cloud rejected auth (${cloudRes.status}) for ${method} ${fullUrl} — sesión revocada`);
       return jsonResponse(res, 503, {
         error: 'Tu sesión fue cerrada o revocada en la nube. Volvé a iniciar sesión.',
         sessionRevoked: true,
@@ -437,17 +596,31 @@ async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false }
     // jsonResponse). El renderer llega via protocol.handle (same-origin) y no necesita CORS; con
     // ACAO:* una página file:// (que isAllowedApiOrigin permite) podría leer via CORS la respuesta
     // proxeada de rutas cloud-only (reportes/finanzas/empleados) usando el Bearer guardado.
-    res.writeHead(cloudRes.status, {
+    const responseHeaders = {
       'Content-Type': cloudRes.headers.get('content-type') || 'application/json',
       ...SECURITY_HEADERS,
-    });
-    res.end(responseText);
+    };
+    if (rawResponse) {
+      for (const name of ['cache-control', 'etag', 'last-modified']) {
+        const value = cloudRes.headers.get(name);
+        if (value) responseHeaders[name] = value;
+      }
+      responseHeaders['Content-Length'] = String(responseBody.length);
+    }
+    res.writeHead(cloudRes.status, responseHeaders);
+    res.end(responseBody);
   } catch (err) {
     console.error(`[LOCAL-API] Cloud proxy failed for ${method} ${fullUrl}:`, err.message);
+    const isImageMutation = /\/items\/\d+\/image(?:\?|$)/.test(fullUrl)
+      && (method === 'PUT' || method === 'DELETE');
     jsonResponse(res, 503, {
-      error: 'No se pudo conectar con el servidor. Verifica tu conexión a internet.',
+      error: isImageMutation
+        ? 'Para cargar o eliminar imágenes necesitás conexión a internet.'
+        : 'No se pudo conectar con el servidor. Verifica tu conexión a internet.',
       offline: true,
     });
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 
@@ -500,10 +673,12 @@ handlers['POST /api/auth/login'] = async (req, res, body) => {
     if (!result.success) {
       const errBody = { error: result.error };
       if (result.emailPending)        errBody.emailPending = true;
-      if (result.deviceVerification) errBody.deviceVerificationRequired = true;
+      if (result.deviceVerification) errBody.requiresDeviceVerification = true;
       if (result.email)               errBody.email = result.email;
+      if (result.deviceInfo)          errBody.deviceInfo = result.deviceInfo;
+      if (result.codeSent != null)    errBody.codeSent = result.codeSent;
       if (result.blocked)             errBody.blocked = true;
-      return jsonResponse(res, 401, errBody);
+      return jsonResponse(res, result.deviceVerification || result.blocked ? 403 : 401, errBody);
     }
 
     // Notify index.js to start sync (or skip if offline)
@@ -527,6 +702,47 @@ handlers['POST /api/auth/login'] = async (req, res, body) => {
   }
 };
 
+handlers['POST /api/auth/verify-device'] = async (req, res, body, route, query) => {
+  const { email, code } = body;
+  if (!email || !code) {
+    return jsonResponse(res, 400, { error: 'Email y código son requeridos.' });
+  }
+
+  const result = await authService.verifyDevice(email, code, query.forceLogout === 'true', {
+    onStatus: (status) => loginEvents.emit('login-status', status),
+  });
+  if (!result.success) {
+    const { success, _httpStatus, ...errBody } = result;
+    return jsonResponse(res, _httpStatus || 400, errBody);
+  }
+
+  loginEvents.emit('login-success', result);
+  const u = result.user;
+  return jsonResponse(res, 200, {
+    token:              u.token,
+    clientId:           u.clientId,
+    sucursalId:         u.sucursalId,
+    employeeId:         u.employeeId,
+    employeeName:       u.employeeName       || '',
+    clientName:         u.clientName         || '',
+    roles:              u.roles              || [],
+    subscriptionStatus: u.subscriptionStatus || 'ACTIVE',
+  });
+};
+
+handlers['POST /api/auth/resend-verification-code'] = async (req, res, body) => {
+  if (!body.email) {
+    return jsonResponse(res, 400, { error: 'Email es requerido.' });
+  }
+  try {
+    const result = await apiClient.resendVerificationCode(body.email);
+    const { _httpStatus, ...responseBody } = result || {};
+    return jsonResponse(res, _httpStatus || 200, responseBody);
+  } catch (err) {
+    return jsonResponse(res, 503, { error: `No se pudo reenviar el código: ${err.message}` });
+  }
+};
+
 handlers['GET /api/auth/me'] = async (req, res) => {
   const db = getDb();
   const token = getConfigVal(db, 'auth_token');
@@ -543,6 +759,20 @@ handlers['GET /api/auth/me'] = async (req, res) => {
 };
 
 handlers['GET /api/auth/session-status'] = async (req, res) => {
+  const db = getDb();
+  const revoked = getConfigVal(db, 'cloud_session_revoked') === '1';
+  if (!getConfigVal(db, 'auth_token') || !apiClient.token || revoked) {
+    return jsonResponse(res, 401, {
+      active: false,
+      reason: revoked ? 'SESSION_CLOSED' : 'NO_SESSION',
+      ...(revoked ? {
+        message: 'Tu sesión fue cerrada porque iniciaste sesión en otro dispositivo.',
+      } : {}),
+    });
+  }
+
+  // Refleja el último estado confirmado por el heartbeat autenticado del main process. No hacemos
+  // otra llamada a la nube aquí para no duplicar el tráfico periódico del frontend y de Electron.
   return jsonResponse(res, 200, { active: true });
 };
 
@@ -769,9 +999,21 @@ handlers['POST /sales'] = async (req, res, body) => {
   const saleDateBusiness = toBusinessIso(saleDate);
 
   // Get current open cash session
-  const currentSession = db.get(
-    "SELECT id FROM cash_sessions WHERE status = 'OPEN' ORDER BY opening_time DESC LIMIT 1"
-  );
+  const currentSession = getScopedOpenCashSession(db);
+  // Una versión vieja del frontend podía omitir cashRegisterId en ventas estándar aunque el turno
+  // local sí tuviera caja. Persistir la caja efectiva evita que el sync envíe NULL y que la nube
+  // rechace la venta con 409 por no poder abrir/vincular la sesión.
+  const effectiveCashRegisterId = Number(cashRegisterId) > 0
+    ? Number(cashRegisterId)
+    : (Number(currentSession?.cash_register_id) > 0 ? Number(currentSession.cash_register_id) : null);
+  if (!currentSession) {
+    return jsonResponse(res, 409, { error: 'No hay un turno de caja abierto para registrar la venta.' });
+  }
+  if (!effectiveCashRegisterId) {
+    return jsonResponse(res, 409, {
+      error: 'El turno abierto no tiene una caja válida asociada. Cerralo y abrí uno nuevo antes de vender.',
+    });
+  }
 
   // P1-08: si la venta offline no trae employeeId, usar el del usuario logueado
   // (app_config), igual que devoluciones/movimientos. El backend exige employeeId
@@ -794,7 +1036,7 @@ handlers['POST /sales'] = async (req, res, body) => {
     saleDateBusiness,
     effectiveEmployeeId, effectiveEmployeeName, status,
     totalAmount, totalDiscount, originalTotal || totalAmount, finalTotal || totalAmount,
-    cashRegisterId || null, currentSession ? currentSession.id : null,
+    effectiveCashRegisterId, currentSession ? currentSession.id : null,
     Number(getConfigVal(db, 'client_id')) || null, Number(getConfigVal(db, 'sucursal_id')) || null, // R4-#40: tenant/sucursal de ORIGEN
     (body.invoice && body.invoice.emitInvoice) ? JSON.stringify(body.invoice) : null, // R4-#5 p3: intención de factura offline
   ]);
@@ -878,9 +1120,7 @@ handlers['GET /sales'] = async (req, res, body, route, query) => {
   // las ventas del primer cajero al segundo (nombres, ítems, precios). Scopear a la sesión de caja
   // abierta AHORA (turno actual); si no hay sesión abierta, al empleado logueado. El endpoint scoped
   // GET /cash-sessions/:id/sales ya filtra por cash_session_id; acá replicamos ese aislamiento.
-  const currentSession = db.get(
-    "SELECT id FROM cash_sessions WHERE status = 'OPEN' ORDER BY opening_time DESC LIMIT 1"
-  );
+  const currentSession = getScopedOpenCashSession(db);
   const currentEmployeeId = Number(getConfigVal(db, 'employee_id')) || null;
 
   let sales;
@@ -922,6 +1162,91 @@ handlers['GET /sales'] = async (req, res, body, route, query) => {
   });
 
   return jsonResponse(res, 200, result);
+};
+
+function localSaleToDto(db, sale) {
+  const items = db.all('SELECT * FROM sale_items WHERE sale_local_id = ? ORDER BY id ASC', [sale.local_id]);
+  const payments = db.all('SELECT * FROM sale_payments WHERE sale_local_id = ? ORDER BY id ASC', [sale.local_id]);
+  return {
+    id: sale.cloud_id || sale.local_id,
+    saleDate: sale.sale_date,
+    fecha: sale.sale_date,
+    totalAmount: sale.total_amount,
+    totalDiscount: sale.total_discount || 0,
+    status: sale.status,
+    paymentMethod: payments[0]?.payment_method || 'EFECTIVO',
+    payments: payments.map((payment) => ({
+      id: payment.id,
+      paymentMethod: payment.payment_method,
+      amount: payment.amount,
+      externalId: payment.external_ref || undefined,
+    })),
+    items: items.map((item) => ({
+      saleItemId: item.id,
+      productId: item.product_id,
+      productName: item.product_name,
+      quantity: item.quantity,
+      unitPrice: item.unit_price,
+    })),
+  };
+}
+
+/**
+ * Resuelve el ID que ve el usuario sin mezclar los dos espacios de IDs del POS.
+ * Una fila sincronizada deja de ser identificable por local_id: desde ese momento su ID público
+ * es cloud_id. El local_id sólo sigue siendo público mientras cloud_id es NULL (venta offline).
+ */
+function findLocalSaleByPublicId(db, saleId) {
+  const cloudSale = db.get(
+    'SELECT * FROM sales WHERE cloud_id = ? ORDER BY local_id DESC LIMIT 1',
+    [saleId]
+  );
+  if (cloudSale) return cloudSale;
+  return db.get(
+    'SELECT * FROM sales WHERE local_id = ? AND cloud_id IS NULL',
+    [saleId]
+  );
+}
+
+// El modal de devoluciones consulta una venta puntual antes de habilitar las cantidades.
+// Esta ruta faltaba en el servidor local: para un cajero siempre terminaba en el 404 del router,
+// aunque la venta estuviera guardada en SQLite. Si no pertenece a este dispositivo, se intenta
+// la consulta cloud para conservar el flujo online de ventas hechas desde otro puesto.
+handlers['GET /sales/:id'] = async (req, res, body, route, query, pathParams) => {
+  const db = getDb();
+  const saleId = Number(pathParams.id);
+  const localClientId = Number(getConfigVal(db, 'client_id')) || null;
+  const localSucursalId = Number(getConfigVal(db, 'sucursal_id')) || null;
+
+  if ((localClientId != null && Number(route.clientId) !== localClientId)
+      || (localSucursalId != null && Number(route.sucursalId) !== localSucursalId)) {
+    return jsonResponse(res, 403, { error: 'Ruta no permitida desde el POS.' });
+  }
+
+  const sale = findLocalSaleByPublicId(db, saleId);
+
+  const belongsToActiveBranch = sale
+    && (sale.client_id == null || localClientId == null || Number(sale.client_id) === localClientId)
+    && (sale.sucursal_id == null || localSucursalId == null || Number(sale.sucursal_id) === localSucursalId);
+  if (belongsToActiveBranch) {
+    return jsonResponse(res, 200, localSaleToDto(db, sale));
+  }
+
+  if (apiClient.token) {
+    try {
+      const cloudSale = await apiClient.getSaleById(saleId);
+      return jsonResponse(res, 200, cloudSale);
+    } catch (err) {
+      const cloudError = parseCloudHttpError(err);
+      if (cloudError) return jsonResponse(res, cloudError.status, { error: cloudError.message });
+      return jsonResponse(res, 503, {
+        error: 'La venta no está guardada en este POS y no se pudo consultar en la nube.',
+        offline: true,
+      });
+    }
+  }
+
+  return jsonResponse(res, 404, { error: 'Venta no encontrada en este POS.' });
 };
 
 // ─── DAILY-CLOSE / SESSIONS (local read for RegisterPicker) ─────────────────
@@ -979,6 +1304,19 @@ handlers['GET /daily-close/sessions'] = async (req, res, body, route, query) => 
 };
 
 // ─── CASH REGISTERS ─────────────────────────────────────
+
+function parseCloudHttpError(err) {
+  const match = String(err?.message || '').match(/^HTTP\s+(\d+):\s*([\s\S]*)$/);
+  if (!match) return null;
+
+  const status = Number(match[1]);
+  const rawBody = match[2];
+  let body = {};
+  try { body = rawBody ? JSON.parse(rawBody) : {}; } catch (_) { /* respuesta no JSON */ }
+  const message = body.message || body.reason || body.error || rawBody
+    || 'La nube rechazó la operación.';
+  return { status, message };
+}
 
 handlers['GET /registers'] = async (req, res, body, route, query) => {
   const db = getDb();
@@ -1044,13 +1382,139 @@ handlers['GET /registers'] = async (req, res, body, route, query) => {
   return jsonResponse(res, 200, dtos);
 };
 
+handlers['GET /registers/availability'] = async (req, res, body, route, query) => {
+  const db = getDb();
+  const onlyActive = query.onlyActive !== 'false';
+  const localClientId = getConfigVal(db, 'client_id');
+
+  if (route.clientId != null && localClientId != null
+      && String(route.clientId) !== String(localClientId)) {
+    return jsonResponse(res, 403, { error: 'Ruta no permitida desde el POS.' });
+  }
+
+  // Fuente autoritativa: la nube ve las aperturas hechas por todos los POS y navegadores.
+  try {
+    if (apiClient.token && await apiClient.isOnline() && apiClient.lastHeartbeatAuthed) {
+      const cloudData = await apiClient.getRegisterAvailability(onlyActive);
+      return jsonResponse(res, 200, (Array.isArray(cloudData) ? cloudData : []).map((entry) => ({
+        ...entry,
+        availabilityVerified: true,
+      })));
+    }
+  } catch (err) {
+    const cloudError = parseCloudHttpError(err);
+    if (cloudError) {
+      return jsonResponse(res, cloudError.status, { error: cloudError.message });
+    }
+    console.log('[LOCAL-API] Register availability cloud fetch failed, using local state:', err.message);
+  }
+
+  // Sin conexión no afirmamos que una caja esté libre: exponemos el estado local y lo marcamos
+  // expresamente como no verificado para que la UI lo comunique al cajero.
+  const where = onlyActive ? 'WHERE active = 1' : '';
+  const registers = db.all(`SELECT * FROM cash_registers ${where} ORDER BY name ASC`);
+  const localOpen = db.all("SELECT * FROM cash_sessions WHERE status = 'OPEN' AND cash_register_id IS NOT NULL");
+  const openByRegister = new Map(localOpen.map((s) => [String(s.cash_register_id), s]));
+
+  return jsonResponse(res, 200, registers.map((r) => {
+    const session = openByRegister.get(String(r.id));
+    return {
+      register: {
+        id: r.id,
+        code: r.code || '',
+        name: r.name,
+        active: !!r.active,
+        defaultOpeningFloat: r.default_opening_float || 0,
+        blindCountEnabled: !!r.blind_count_enabled,
+        cashierReleaseEnabled: !!r.cashier_release_enabled,
+        sucursalId: r.sucursal_id,
+        pointDeviceId: r.point_device_id || null,
+      },
+      occupied: !!session,
+      occupiedSessionId: session?.cloud_id || session?.id || null,
+      occupiedByEmployeeId: session?.employee_id || null,
+      occupiedByEmployeeName: session?.employee_name || null,
+      occupiedSince: session?.opening_time || null,
+      availabilityVerified: false,
+      _offlineWarning: true,
+    };
+  }));
+};
+
 // ─── CASH SESSIONS ───────────────────────────────────────
 
 handlers['GET /cash-sessions/current'] = async (req, res) => {
   const db = getDb();
-  const session = db.get(
-    "SELECT * FROM cash_sessions WHERE status = 'OPEN' ORDER BY opening_time DESC LIMIT 1"
-  );
+  let session = getScopedOpenCashSession(db);
+
+  // Online-first: la sesión actual del JWT es la autoridad. Una fila OPEN de otro empleado
+  // nunca se devuelve como propia. Las aperturas offline del mismo empleado se intentan enlazar
+  // por UUID; un rechazo funcional de la nube las aísla para que no habiliten ventas por error.
+  try {
+    if (apiClient.token && await apiClient.isOnline() && apiClient.lastHeartbeatAuthed) {
+      const cloudSession = await apiClient.getCurrentSession();
+      if (cloudSession?.status === 'OPEN') {
+        const locallyClosed = getScopedClosedCashSessionByCloudId(db, cloudSession.id);
+        if (locallyClosed) {
+          // La nube puede quedar unos segundos detrás del cierre local mientras el sync sube ventas,
+          // movimientos y finalmente el arqueo. No resucitar esa misma sesión como una fila OPEN.
+          if (session?.cloud_id && String(session.cloud_id) === String(cloudSession.id)) {
+            quarantineLocalCashSession(
+              db,
+              session,
+              'Duplicado local descartado: esta sesión ya había sido cerrada en el POS.'
+            );
+          }
+          session = session?.cloud_id && String(session.cloud_id) === String(cloudSession.id)
+            ? null
+            : session;
+          db.save();
+        } else {
+          session = linkOrMirrorCloudCashSession(db, session, cloudSession);
+          db.save();
+        }
+      } else if (session?.cloud_id) {
+        quarantineLocalCashSession(db, session, 'La nube ya no reconoce esta sesión como abierta.');
+        db.save();
+        session = null;
+      } else if (session?.client_session_uuid && session?.cash_register_id) {
+        try {
+          const reconciled = await apiClient.openSession({
+            clientSessionUuid: session.client_session_uuid,
+            cashRegisterId: Number(session.cash_register_id),
+            initialAmount: Number(session.initial_amount) || 0,
+          });
+          if (reconciled?.status === 'OPEN') {
+            session = linkOrMirrorCloudCashSession(db, session, reconciled);
+          } else {
+            quarantineLocalCashSession(db, session, 'La sesión idempotente ya no está abierta en la nube.');
+            session = null;
+          }
+          db.save();
+        } catch (err) {
+          const cloudError = parseCloudHttpError(err);
+          if (cloudError && cloudError.status >= 400 && cloudError.status < 500) {
+            quarantineLocalCashSession(db, session, cloudError.message);
+            db.save();
+            session = null;
+          } else if (cloudError) {
+            return jsonResponse(res, cloudError.status, { error: cloudError.message });
+          }
+          // Error de transporte: conservar la sesión offline scoped del mismo empleado.
+        }
+      } else if (session) {
+        quarantineLocalCashSession(db, session, 'Sesión local antigua sin identificador para reconciliar.');
+        db.save();
+        session = null;
+      }
+    }
+  } catch (err) {
+    const cloudError = parseCloudHttpError(err);
+    if (cloudError) {
+      return jsonResponse(res, cloudError.status, { error: cloudError.message });
+    }
+    // Sin conectividad real se mantiene el modo offline, siempre scoped al empleado actual.
+  }
 
   if (!session) return jsonResponse(res, 200, null);
 
@@ -1117,8 +1581,8 @@ handlers['POST /cash-sessions/open'] = async (req, res, body) => {
   if (blockIfSessionRevoked(db, res)) return; // A02
   const { cashRegisterId, initialAmount, declaredAmount } = body;
 
-  // Check no open session exists
-  const existing = db.get("SELECT id FROM cash_sessions WHERE status = 'OPEN'");
+  // El usuario actual no puede abrir un segundo turno. Otros usuarios sólo bloquean su caja.
+  const existing = getScopedOpenCashSession(db);
   if (existing) {
     return jsonResponse(res, 400, { error: 'Ya hay una sesión de caja abierta.' });
   }
@@ -1127,7 +1591,21 @@ handlers['POST /cash-sessions/open'] = async (req, res, body) => {
     ? db.get('SELECT * FROM cash_registers WHERE id = ?', [cashRegisterId])
     : null;
 
-  const amount = declaredAmount || initialAmount || 0;
+  if (!cashRegisterId || !register || !register.active) {
+    return jsonResponse(res, 409, { error: 'La caja seleccionada no existe o está inactiva.' });
+  }
+
+  const localRegisterOccupant = db.get(
+    "SELECT employee_name FROM cash_sessions WHERE status = 'OPEN' AND cash_register_id = ? LIMIT 1",
+    [cashRegisterId]
+  );
+  if (localRegisterOccupant) {
+    return jsonResponse(res, 409, {
+      error: `La caja seleccionada ya está ocupada${localRegisterOccupant.employee_name ? ` por ${localRegisterOccupant.employee_name}` : ''}.`,
+    });
+  }
+
+  const requestedAmount = declaredAmount ?? initialAmount;
   const now = businessNowIso(); // C05: hora de negocio (Argentina)
   const today = now.slice(0, 10);
   const employeeId = Number(getConfigVal(db, 'employee_id'));
@@ -1137,12 +1615,37 @@ handlers['POST /cash-sessions/open'] = async (req, res, body) => {
   // (rework de enlace de sesión) para deduplicar reaperturas; aquí ya queda generada y guardada.
   const clientSessionUuid = crypto.randomUUID();
 
+  let cloudSession = null;
+  try {
+    if (apiClient.token && await apiClient.isOnline() && apiClient.lastHeartbeatAuthed) {
+      cloudSession = await apiClient.openSession({
+        clientSessionUuid,
+        cashRegisterId: Number(cashRegisterId),
+        ...(requestedAmount != null ? { initialAmount: Number(requestedAmount) } : {}),
+      });
+    }
+  } catch (err) {
+    // Un rechazo HTTP es autoritativo (ocupada, empleado con otra sesión, permisos, etc.).
+    // Un fallo de transporte conserva la capacidad offline; el UUID hace idempotente el reintento.
+    const cloudError = parseCloudHttpError(err);
+    if (cloudError) {
+      return jsonResponse(res, cloudError.status, { error: cloudError.message });
+    }
+    console.log('[LOCAL-API] Cloud register reservation unavailable, opening offline:', err.message);
+  }
+
+  const amount = cloudSession?.initialAmount
+    ?? requestedAmount
+    ?? register.default_opening_float
+    ?? 0;
+
   const result = db.run(`
-    INSERT INTO cash_sessions (client_session_uuid, client_id, sucursal_id, employee_id, employee_name,
+    INSERT INTO cash_sessions (cloud_id, client_session_uuid, client_id, sucursal_id, employee_id, employee_name,
       status, business_date, opening_time, initial_amount, expected_amount,
       cash_register_id, cash_register_name, cash_register_code, sync_status)
-    VALUES (?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, 'pending')
+    VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, 'pending')
   `, [
+    cloudSession?.id || null,
     clientSessionUuid,
     Number(getConfigVal(db, 'client_id')),
     Number(getConfigVal(db, 'sucursal_id')),
@@ -1167,6 +1670,7 @@ handlers['POST /cash-sessions/open'] = async (req, res, body) => {
     cashRegisterCode: register?.code || null,
     employeeId,
     employeeName,
+    onlineConfirmed: !!cloudSession,
   });
 };
 
@@ -1177,14 +1681,34 @@ handlers['POST /shift/open'] = async (req, res, body) => {
   return handlers['POST /cash-sessions/open'](req, res, body);
 };
 
-handlers['POST /cash-sessions/close'] = async (req, res, body) => {
+handlers['POST /cash-sessions/close'] = async (req, res, body, route, query, pathParams = {}) => {
   const db = getDb();
   if (blockIfSessionRevoked(db, res)) return; // R4-#61 (A02): faltaba el guard en el cierre → se podía
   // cerrar/escribir caja con la sesión cloud ya revocada (cubre también el alias close-with-tracking).
   const { countedAmount, floatLeftForNext, note } = body;
 
-  const session = db.get("SELECT * FROM cash_sessions WHERE status = 'OPEN' ORDER BY opening_time DESC LIMIT 1");
+  const requestedId = pathParams.id != null ? Number(pathParams.id) : null;
+  const hasRequestedId = Number.isSafeInteger(requestedId) && requestedId > 0;
+  const session = getScopedOpenCashSession(db);
+
+  // El endpoint con :id debe ser idempotente. Si el primer POST cerró correctamente pero la UI
+  // reintentó por un refresh o una respuesta perdida, devolver el cierre existente evita un 400 y,
+  // sobre todo, impide que un modal viejo cierre por accidente un turno nuevo.
+  if (hasRequestedId && session
+      && String(session.id) !== String(requestedId)
+      && String(session.cloud_id) !== String(requestedId)) {
+    const alreadyClosed = getScopedClosedCashSessionByAnyId(db, requestedId);
+    if (alreadyClosed) return jsonResponse(res, 200, sessionToDto(alreadyClosed));
+    return jsonResponse(res, 409, {
+      error: 'La sesión solicitada ya no es la sesión de caja abierta actual.',
+    });
+  }
+
   if (!session) {
+    if (hasRequestedId) {
+      const alreadyClosed = getScopedClosedCashSessionByAnyId(db, requestedId);
+      if (alreadyClosed) return jsonResponse(res, 200, sessionToDto(alreadyClosed));
+    }
     return jsonResponse(res, 400, { error: 'No hay sesión de caja abierta.' });
   }
 
@@ -1226,9 +1750,9 @@ handlers['GET /cash-sessions/:id/close-preview'] = async (req, res, body, route,
 
   let session;
   if (sessionId === 'current') {
-    session = db.get("SELECT * FROM cash_sessions WHERE status = 'OPEN' ORDER BY opening_time DESC LIMIT 1");
+    session = getScopedOpenCashSession(db);
   } else {
-    session = db.get('SELECT * FROM cash_sessions WHERE id = ?', [sessionId]);
+    session = getOwnedCashSessionByAnyId(db, sessionId);
   }
 
   if (!session) return jsonResponse(res, 404, { error: 'Session not found' });
@@ -1324,8 +1848,10 @@ handlers['GET /cash-sessions/:id/sales'] = async (req, res, body, route, query, 
   let sessionId = pathParams.id;
 
   if (sessionId === 'current') {
-    const current = db.get("SELECT id FROM cash_sessions WHERE status = 'OPEN' ORDER BY opening_time DESC LIMIT 1");
+    const current = getScopedOpenCashSession(db);
     sessionId = current ? current.id : -1;
+  } else {
+    sessionId = getOwnedCashSessionByAnyId(db, sessionId)?.id ?? -1;
   }
 
   const sales = db.all(
@@ -1353,8 +1879,10 @@ handlers['GET /cash-sessions/:id/returns'] = async (req, res, body, route, query
   let sessionId = pathParams.id;
 
   if (sessionId === 'current') {
-    const current = db.get("SELECT id FROM cash_sessions WHERE status = 'OPEN' ORDER BY opening_time DESC LIMIT 1");
+    const current = getScopedOpenCashSession(db);
     sessionId = current ? current.id : -1;
+  } else {
+    sessionId = getOwnedCashSessionByAnyId(db, sessionId)?.id ?? -1;
   }
 
   const returns = db.all(
@@ -1389,8 +1917,10 @@ handlers['GET /cash-sessions/:id/expenses'] = async (req, res, body, route, quer
   let sessionId = pathParams.id;
 
   if (sessionId === 'current') {
-    const current = db.get("SELECT id FROM cash_sessions WHERE status = 'OPEN' ORDER BY opening_time DESC LIMIT 1");
+    const current = getScopedOpenCashSession(db);
     sessionId = current ? current.id : -1;
+  } else {
+    sessionId = getOwnedCashSessionByAnyId(db, sessionId)?.id ?? -1;
   }
 
   const movements = db.all(
@@ -1428,11 +1958,18 @@ handlers['POST /promotions/apply'] = async (req, res, body) => {
 
 // ─── RETURNS ─────────────────────────────────────────────
 
-handlers['POST /returns'] = async (req, res, body) => {
+handlers['POST /returns'] = async (req, res, body, route) => {
   const db = getDb();
   if (blockIfSessionRevoked(db, res)) return; // A02
+  const localClientId = Number(getConfigVal(db, 'client_id')) || null;
+  const localSucursalId = Number(getConfigVal(db, 'sucursal_id')) || null;
+  if ((localClientId != null && Number(route.clientId) !== localClientId)
+      || (localSucursalId != null && Number(route.sucursalId) !== localSucursalId)) {
+    return jsonResponse(res, 403, { error: 'Ruta no permitida desde el POS.' });
+  }
   const {
     saleId, reason, refundMethod = 'CASH', // B01: 'CASH' canónico (enum RefundMethod del backend)
+    clientReturnUuid: requestedClientReturnUuid,
     items = [],
   } = body;
 
@@ -1441,12 +1978,33 @@ handlers['POST /returns'] = async (req, res, body) => {
   }
 
   // Find original sale (by cloud_id or local_id)
-  const sale = db.get(
-    'SELECT * FROM sales WHERE cloud_id = ? OR local_id = ?',
-    [saleId, saleId]
-  );
+  let sale = findLocalSaleByPublicId(db, saleId);
+  if (sale && ((sale.client_id != null && localClientId != null && Number(sale.client_id) !== localClientId)
+      || (sale.sucursal_id != null && localSucursalId != null && Number(sale.sucursal_id) !== localSucursalId))) {
+    sale = null;
+  }
   if (!sale) {
-    return jsonResponse(res, 404, { error: 'Venta no encontrada.' });
+    // Una venta hecha en otro puesto no existe en este SQLite. Con conexión, completar la
+    // devolución directamente en la nube; sin conexión no hay datos suficientes para validarla.
+    if (apiClient.token) {
+      try {
+        const cloudReturn = await apiClient.createReturn({
+          ...body,
+          reason: reason?.trim() || 'Devolución desde POS',
+          refundMethod,
+          clientReturnUuid: requestedClientReturnUuid || crypto.randomUUID(),
+        });
+        return jsonResponse(res, 201, cloudReturn);
+      } catch (err) {
+        const cloudError = parseCloudHttpError(err);
+        if (cloudError) return jsonResponse(res, cloudError.status, { error: cloudError.message });
+        return jsonResponse(res, 503, {
+          error: 'La venta no está guardada en este POS y no se pudo registrar la devolución en la nube.',
+          offline: true,
+        });
+      }
+    }
+    return jsonResponse(res, 404, { error: 'Venta no encontrada en este POS.' });
   }
 
   // Validate items & calculate total refund
@@ -1491,16 +2049,14 @@ handlers['POST /returns'] = async (req, res, body) => {
   totalRefund = round2(totalRefund); // B10
 
   // Get current open cash session
-  const currentSession = db.get(
-    "SELECT id FROM cash_sessions WHERE status = 'OPEN' ORDER BY opening_time DESC LIMIT 1"
-  );
+  const currentSession = getScopedOpenCashSession(db);
 
   const employeeId = Number(getConfigVal(db, 'employee_id'));
   const employeeName = getConfigVal(db, 'employee_name') || '';
   const now = businessNowIso(); // C05: hora de negocio (Argentina)
 
   // Clave de idempotencia (C01): se persiste y el sync la reenvía en cada reintento.
-  const clientReturnUuid = crypto.randomUUID();
+  const clientReturnUuid = requestedClientReturnUuid || crypto.randomUUID();
 
   // P1-01: devolución + ítems + restauración de stock + ajuste de caja, atómicos.
   let returnLocalId;
@@ -1547,14 +2103,31 @@ handlers['POST /returns'] = async (req, res, body) => {
 
   return jsonResponse(res, 201, {
     id: returnLocalId,
+    saleReturnId: returnLocalId,
     saleId: sale.cloud_id || sale.local_id,
     returnDate: now,
+    returnedAt: now,
     reason: reason || null,
     refundMethod,
     totalRefundAmount: totalRefund,
+    totalRefund,
     employeeId,
     employeeName,
+    processedByName: employeeName,
+    cashSessionId: currentSession ? currentSession.id : null,
     offlineCreated: true,
+    fiscalDocument: {
+      required: true,
+      status: 'PENDING_SYNC',
+      invoiceId: null,
+      type: null,
+      number: null,
+      cae: null,
+      caeExpiration: null,
+      updatedAt: now,
+      message: 'Se evaluará la Nota de Crédito cuando la devolución se sincronice con la nube.',
+      retryable: false,
+    },
     items: validatedItems.map((vi) => ({
       productId: vi.productId,
       productName: vi.productName,
@@ -1589,13 +2162,32 @@ handlers['GET /returns'] = async (req, res, body, route, query) => {
     const items = db.all('SELECT * FROM return_items WHERE return_local_id = ?', [r.local_id]);
     return {
       id: r.cloud_id || r.local_id,
+      saleReturnId: r.cloud_id || r.local_id,
       saleId: r.sale_cloud_id || r.sale_local_id,
       returnDate: r.return_date,
+      returnedAt: r.return_date,
       reason: r.reason,
       refundMethod: r.refund_method,
       totalRefundAmount: r.total_refund_amount,
+      totalRefund: r.total_refund_amount,
       employeeId: r.employee_id,
       employeeName: r.employee_name,
+      processedByName: r.employee_name,
+      cashSessionId: r.cash_session_id,
+      fiscalDocument: {
+        required: r.fiscal_status !== 'NOT_REQUIRED',
+        status: r.fiscal_status || (r.sync_status === 'synced' ? 'FAILED' : 'PENDING_SYNC'),
+        invoiceId: r.fiscal_invoice_id || null,
+        type: r.fiscal_type || null,
+        number: r.fiscal_number || null,
+        cae: r.fiscal_cae || null,
+        caeExpiration: r.fiscal_cae_expiration || null,
+        updatedAt: r.fiscal_updated_at || null,
+        message: r.fiscal_message || (r.sync_status === 'synced'
+          ? 'Sin información fiscal devuelta por la nube.'
+          : 'Pendiente de sincronizar con la nube.'),
+        retryable: Boolean(r.fiscal_retryable),
+      },
       items: items.map((i) => ({
         productId: i.product_id,
         productName: i.product_name,
@@ -1606,6 +2198,42 @@ handlers['GET /returns'] = async (req, res, body, route, query) => {
   });
 
   return jsonResponse(res, 200, result);
+};
+
+handlers['POST /returns/:id/fiscal-document/retry'] = async (req, res, body, route, query, pathParams) => {
+  if (!isAdminOrOwner()) {
+    return jsonResponse(res, 403, { error: 'Solo propietarios y administradores pueden reintentar documentos fiscales.' });
+  }
+  try {
+    const result = await apiClient.retryReturnFiscalDocument(pathParams.id);
+    const fiscal = result.fiscalDocument || {};
+    const db = getDb();
+    db.run(`
+      UPDATE returns
+         SET fiscal_status = ?, fiscal_message = ?, fiscal_invoice_id = ?, fiscal_type = ?,
+             fiscal_number = ?, fiscal_cae = ?, fiscal_cae_expiration = ?,
+             fiscal_updated_at = ?, fiscal_retryable = ?
+       WHERE cloud_id = ?
+    `, [
+      fiscal.status || 'FAILED',
+      fiscal.message || 'La nube no devolvió información fiscal para esta devolución.',
+      fiscal.invoiceId || null,
+      fiscal.type || null,
+      fiscal.number || null,
+      fiscal.cae || null,
+      fiscal.caeExpiration || null,
+      fiscal.updatedAt || null,
+      fiscal.retryable ? 1 : 0,
+      Number(pathParams.id),
+    ]);
+    db.save();
+    return jsonResponse(res, 200, result);
+  } catch (err) {
+    const cloudError = parseCloudHttpError(err);
+    return jsonResponse(res, cloudError?.status || 503, {
+      error: cloudError?.message || 'No se pudo reintentar la Nota de Crédito en la nube.',
+    });
+  }
 };
 
 // ─── CASH MOVEMENTS (expenses, injections, withdrawals) ─
@@ -1645,9 +2273,7 @@ handlers['POST /expenses'] = async (req, res, body) => {
     return jsonResponse(res, 400, { error: `Tipo inválido. Valores permitidos: ${validTypes.join(', ')}` });
   }
 
-  const currentSession = db.get(
-    "SELECT id FROM cash_sessions WHERE status = 'OPEN' ORDER BY opening_time DESC LIMIT 1"
-  );
+  const currentSession = getScopedOpenCashSession(db);
 
   const employeeId = Number(getConfigVal(db, 'employee_id'));
   const employeeName = getConfigVal(db, 'employee_name') || '';
@@ -1808,6 +2434,12 @@ function routeRequest(method, pathname, route) {
     return { handler: handlers['GET /items/:id'], params: { id: Number(itemMatch[1]) } };
   }
 
+  // /sales/:id (búsqueda previa a una devolución)
+  const saleMatch = cleanSubpath.match(/^\/sales\/(\d+)$/);
+  if (saleMatch && method === 'GET') {
+    return { handler: handlers['GET /sales/:id'], params: { id: Number(saleMatch[1]) } };
+  }
+
   // /cash-sessions/:id/close-preview
   const closePreviewMatch = cleanSubpath.match(/^\/cash-sessions\/([^/]+)\/close-preview$/);
   if (closePreviewMatch && method === 'GET') {
@@ -1830,6 +2462,14 @@ function routeRequest(method, pathname, route) {
   const sessionReturnsMatch = cleanSubpath.match(/^\/cash-sessions\/([^/]+)\/returns$/);
   if (sessionReturnsMatch && method === 'GET') {
     return { handler: handlers['GET /cash-sessions/:id/returns'], params: { id: sessionReturnsMatch[1] } };
+  }
+
+  const returnFiscalRetryMatch = cleanSubpath.match(/^\/returns\/(\d+)\/fiscal-document\/retry$/);
+  if (returnFiscalRetryMatch && method === 'POST') {
+    return {
+      handler: handlers['POST /returns/:id/fiscal-document/retry'],
+      params: { id: Number(returnFiscalRetryMatch[1]) },
+    };
   }
 
   // /cash-sessions/:id/expenses
@@ -1880,11 +2520,13 @@ function startLocalServer() {
         if (!isAllowedMutationOrigin(req.headers.origin)) {
           return jsonResponse(res, 403, { error: 'Origen no autorizado para esta operación.' });
         }
-        // Excepciones: login no requiere token previo (es el que lo genera)
+        // These public auth steps run before a token exists.
         const mutationPath = decodeURIComponent(req.url.split('?')[0]);
-        const isLoginEndpoint = mutationPath === '/api/auth/login'
-          || mutationPath === '/api/auth/logout';
-        if (!isLoginEndpoint) {
+        const isPublicAuthEndpoint = mutationPath === '/api/auth/login'
+          || mutationPath === '/api/auth/logout'
+          || mutationPath === '/api/auth/verify-device'
+          || mutationPath === '/api/auth/resend-verification-code';
+        if (!isPublicAuthEndpoint) {
           try {
             if (blockIfNoSessionToken(getDb(), res)) return;
           } catch (_) {
@@ -1961,6 +2603,12 @@ function startLocalServer() {
         if (localImageMatch && req.method === 'GET') {
           imageCache.serveRequest(req, res, Number(localImageMatch[1]), localImageMatch[2]);
           return;
+        }
+
+        // Development object storage: CloudFront serves these immutable public objects in prod.
+        // Proxy them for every POS role so a cache miss can still render while the offline cache fills.
+        if (req.method === 'GET' && /^\/api\/local-product-images\/product-images\/\d+\/\d+\/\d+\/[0-9a-f-]+\/(full|thumb)\.jpg$/i.test(pathname)) {
+          return await proxyToCloud(req, res, req.method, req.url, {}, { rawResponse: true });
         }
 
         let body;

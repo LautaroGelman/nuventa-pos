@@ -40,9 +40,9 @@ y el proxy del servidor local lo usan.
 | Caja | `createCashMovement(payload)`, `listRegisters(onlyActive)`, `getCurrentSession()`, `openSession(body)`, `closeSession(sessionId, body)` |
 | Sucursales | `getSucursales()` |
 
-> `login()` ([api-client.js:88](../src/main/api-client.js#L88)) no usa `_fetch`: maneja
-> explícitamente 403 (`_httpStatus:403`) y 409 (`activeSessionConflict`) para que `auth-service`
-> los procese. `closeSession` apunta a `…/cash-sessions/{id}/close-with-tracking`.
+> `login()`, `verifyDevice()` y `resendVerificationCode()` no usan `_fetch`: preservan
+> explícitamente el estado HTTP en `_httpStatus` para que `auth-service` y el servidor local
+> los procesen. `closeSession` apunta a `…/cash-sessions/{id}/close-with-tracking`.
 
 ---
 
@@ -99,7 +99,7 @@ en `process.argv`.
 | Objeto global | Métodos |
 |---------------|---------|
 | `window.nuventaConfig` | `getEnv()` → `{ env, isDev, webAppUrl, backendApiUrl }` |
-| `window.nuventaAuth` | `offlineLogin(email, password)`, `logout()`, `onLoginStatus(cb)` |
+| `window.nuventaAuth` | `offlineLogin(email, password)`, `logout()`, `setActiveBranch(id)`, `onLoginStatus(cb)` |
 | `window.nuventaSync` | `forceSync()`, `getStatus()`, `onSyncStatus(cb)`, `onSyncComplete(cb)` |
 
 Estos globals son el contrato que el frontend (y la página de fallback) usan para hablar con el

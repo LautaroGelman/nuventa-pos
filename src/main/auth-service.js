@@ -68,6 +68,9 @@ function parseJwt(token) {
 class AuthService {
   constructor() {
     this._currentUser = null;
+    // The backend verifies the password before issuing a device challenge. Keep it only in
+    // memory while that challenge is open so a successful verification can enable offline login.
+    this._pendingDeviceLogin = null;
   }
 
   /**
@@ -83,6 +86,7 @@ class AuthService {
   async login(email, password, { onStatus } = {}) {
     const db = getDb();
     const notify = onStatus || (() => {});
+    this._pendingDeviceLogin = null;
 
     // Step 1: Check if user exists locally
     const localUser = db.get('SELECT * FROM users WHERE email = ?', [email]);
@@ -121,7 +125,7 @@ class AuthService {
 
       // Handle 403 responses from backend
       if (result && result._httpStatus === 403) {
-        return this._handle403(result);
+        return this._handle403(result, email, password);
       }
 
       // Handle 409 active session conflict — force logout and retry
@@ -171,7 +175,7 @@ class AuthService {
 
       // Handle 403 responses from backend
       if (result && result._httpStatus === 403) {
-        return this._handle403(result);
+        return this._handle403(result, email, password);
       }
 
       // Handle 409 active session conflict — force logout and retry
@@ -322,7 +326,7 @@ class AuthService {
   /**
    * Handle 403 responses from the backend.
    */
-  _handle403(result) {
+  _handle403(result, email, password) {
     if (result.emailPending) {
       return {
         success: false,
@@ -330,12 +334,24 @@ class AuthService {
         emailPending: true,
       };
     }
-    if (result.deviceVerificationRequired) {
+    // The cloud contract is `requiresDeviceVerification`. Accept the legacy POS alias too so
+    // installed clients remain compatible during rolling deployments.
+    if (result.requiresDeviceVerification || result.deviceVerificationRequired) {
+      if (email && password) {
+        const pending = { email, password, expiresAt: Date.now() + 10 * 60 * 1000 };
+        this._pendingDeviceLogin = pending;
+        const expiryTimer = setTimeout(() => {
+          if (this._pendingDeviceLogin === pending) this._pendingDeviceLogin = null;
+        }, 10 * 60 * 1000);
+        if (typeof expiryTimer.unref === 'function') expiryTimer.unref();
+      }
       return {
         success: false,
         error: result.message || 'Se requiere verificación del dispositivo.',
         deviceVerification: true,
-        email: result.email,
+        email: result.email || email,
+        deviceInfo: result.deviceInfo || '',
+        codeSent: result.codeSent !== false,
       };
     }
     if (result.blocked) {
@@ -358,7 +374,7 @@ class AuthService {
     notify({ step: 'force-login', message: 'Sesión activa en otro dispositivo. Cerrando sesión anterior...' });
     try {
       const result = await apiClient.login(email, password, true); // forceLogout = true
-      if (result && result._httpStatus === 403) return this._handle403(result);
+      if (result && result._httpStatus === 403) return this._handle403(result, email, password);
       if (result && result._httpStatus === 409) {
         return { success: false, error: 'No se pudo cerrar la sesión anterior. Intentá de nuevo.' };
       }
@@ -372,6 +388,59 @@ class AuthService {
   }
 
   /**
+   * Complete a cloud login after the user validates the new-device email code.
+   */
+  async verifyDevice(email, code, forceLogout = false, { onStatus } = {}) {
+    const notify = onStatus || (() => {});
+    try {
+      const result = await apiClient.verifyDevice(email, code, forceLogout);
+      if (result && result._httpStatus) {
+        return {
+          ...result,
+          success: false,
+          error: result.message || result.error || 'No se pudo verificar el dispositivo.',
+        };
+      }
+      if (!result || !result.token) {
+        return { success: false, _httpStatus: 502, error: 'Respuesta inesperada del servidor.' };
+      }
+
+      const pending = this._pendingDeviceLogin;
+      if (!pending || pending.expiresAt < Date.now()
+          || pending.email.toLowerCase() !== String(email).toLowerCase()) {
+        this._pendingDeviceLogin = null;
+        return {
+          success: false,
+          _httpStatus: 400,
+          error: 'La verificación expiró en el POS. Volvé a ingresar tu email y contraseña.',
+        };
+      }
+
+      notify({ step: 'saving', message: 'Dispositivo verificado. Guardando credenciales...' });
+      const jwt = parseJwt(result.token);
+      this._saveUserLocally(email, pending.password, result, jwt);
+      this._configureApiClient(result, jwt);
+      const needsSync = await this._checkBranchDataStatus(result.sucursalId, result.clientId, notify);
+      this._currentUser = this._buildUserObject(result, jwt, email);
+      this._pendingDeviceLogin = null;
+
+      return {
+        success: true,
+        user: this._currentUser,
+        token: result.token,
+        needsSync,
+        isOffline: false,
+      };
+    } catch (err) {
+      return {
+        success: false,
+        _httpStatus: 503,
+        error: `Error al conectar con el servidor: ${err.message}`,
+      };
+    }
+  }
+
+  /**
    * Save or update user in local SQLite.
    */
   _saveUserLocally(email, password, loginResult, jwt) {
@@ -381,6 +450,7 @@ class AuthService {
     const roles = Array.isArray(loginResult.roles) ? loginResult.roles
       : typeof loginResult.roles === 'string' ? [loginResult.roles] : [];
     const now = new Date().toISOString();
+    const sucursalId = this._resolveSucursalId(loginResult, jwt);
 
     db.run(`
       INSERT INTO users (email, pw_hash, pw_salt, client_id, sucursal_id,
@@ -395,7 +465,7 @@ class AuthService {
     `, [
       email, pwHash, salt,
       loginResult.clientId || jwt?.clientId || null,
-      loginResult.sucursalId || jwt?.sucursalId || null,
+      sucursalId,
       loginResult.employeeId || jwt?.employeeId || null,
       loginResult.employeeName || jwt?.employeeName || '',
       loginResult.clientName || jwt?.clientName || '',
@@ -411,7 +481,7 @@ class AuthService {
     );
     set('auth_token', encryptToken(loginResult.token));
     set('client_id', String(loginResult.clientId || jwt?.clientId || ''));
-    set('sucursal_id', String(loginResult.sucursalId || jwt?.sucursalId || ''));
+    set('sucursal_id', String(sucursalId || ''));
     set('employee_id', String(loginResult.employeeId || jwt?.employeeId || ''));
     set('employee_name', loginResult.employeeName || jwt?.employeeName || '');
     set('client_name', loginResult.clientName || jwt?.clientName || '');
@@ -433,9 +503,28 @@ class AuthService {
     apiClient.setAuth({
       token: loginResult.token,
       clientId: loginResult.clientId || jwt?.clientId,
-      sucursalId: loginResult.sucursalId || jwt?.sucursalId,
+      sucursalId: this._resolveSucursalId(loginResult, jwt),
       employeeId: loginResult.employeeId || jwt?.employeeId,
     });
+  }
+
+  _resolveSucursalId(loginResult, jwt) {
+    const direct = Number(loginResult.sucursalId || jwt?.sucursalId);
+    if (Number.isSafeInteger(direct) && direct > 0) return direct;
+
+    // Owner JWTs intentionally have no fixed branch. Preserve the branch already selected on
+    // this device when the new login still belongs to the same client.
+    try {
+      const db = getDb();
+      const currentClientId = Number(loginResult.clientId || jwt?.clientId);
+      const storedClientId = Number(db.get("SELECT value FROM app_config WHERE key = 'client_id'")?.value);
+      const storedBranchId = Number(db.get("SELECT value FROM app_config WHERE key = 'sucursal_id'")?.value);
+      if (Number.isSafeInteger(currentClientId) && currentClientId > 0 && currentClientId === storedClientId &&
+          Number.isSafeInteger(storedBranchId) && storedBranchId > 0) {
+        return storedBranchId;
+      }
+    } catch { /* first login or DB not ready */ }
+    return null;
   }
 
   /**
@@ -642,7 +731,7 @@ class AuthService {
       email,
       token: loginResult.token,
       clientId: loginResult.clientId || jwt?.clientId,
-      sucursalId: loginResult.sucursalId || jwt?.sucursalId,
+      sucursalId: this._resolveSucursalId(loginResult, jwt),
       employeeId: loginResult.employeeId || jwt?.employeeId,
       employeeName: loginResult.employeeName || jwt?.employeeName || '',
       clientName: loginResult.clientName || jwt?.clientName || '',
@@ -675,6 +764,7 @@ class AuthService {
    */
   logout() {
     this._currentUser = null;
+    this._pendingDeviceLogin = null;
     apiClient.clearAuth();
   }
 }

@@ -358,6 +358,15 @@ function runMigrations() {
     employee_id         INTEGER,
     employee_name       TEXT,
     cash_session_id     INTEGER,
+    fiscal_status       TEXT DEFAULT 'PENDING_SYNC',
+    fiscal_message      TEXT,
+    fiscal_invoice_id   INTEGER,
+    fiscal_type         TEXT,
+    fiscal_number       TEXT,
+    fiscal_cae          TEXT,
+    fiscal_cae_expiration TEXT,
+    fiscal_updated_at   TEXT,
+    fiscal_retryable    INTEGER DEFAULT 0,
     sync_status         TEXT DEFAULT 'pending',
     sync_error          TEXT,
     retry_count         INTEGER DEFAULT 0,
@@ -544,6 +553,23 @@ function runMigrations() {
     "ALTER TABLE products ADD COLUMN thumbnail_url TEXT",
   ];
   for (const stmt of v7Columns) {
+    try { db.run(stmt); } catch (_) { /* column already exists */ }
+  }
+
+  // v8: trazabilidad de la Nota de Crédito de cada devolución. Antes de sincronizar se muestra
+  // PENDING_SYNC; después se conserva el resultado autoritativo devuelto por el backend.
+  const returnFiscalColumns = [
+    "ALTER TABLE returns ADD COLUMN fiscal_status TEXT DEFAULT 'PENDING_SYNC'",
+    'ALTER TABLE returns ADD COLUMN fiscal_message TEXT',
+    'ALTER TABLE returns ADD COLUMN fiscal_invoice_id INTEGER',
+    'ALTER TABLE returns ADD COLUMN fiscal_type TEXT',
+    'ALTER TABLE returns ADD COLUMN fiscal_number TEXT',
+    'ALTER TABLE returns ADD COLUMN fiscal_cae TEXT',
+    'ALTER TABLE returns ADD COLUMN fiscal_cae_expiration TEXT',
+    'ALTER TABLE returns ADD COLUMN fiscal_updated_at TEXT',
+    'ALTER TABLE returns ADD COLUMN fiscal_retryable INTEGER DEFAULT 0',
+  ];
+  for (const stmt of returnFiscalColumns) {
     try { db.run(stmt); } catch (_) { /* column already exists */ }
   }
 
