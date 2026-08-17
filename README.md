@@ -143,6 +143,7 @@ El archivo [CLAUDE.md](CLAUDE.md) es el punto de entrada. Documentación técnic
 | [docs/local-api.md](docs/local-api.md) | Catálogo de endpoints del servidor local, ruteo, role gating y proxy a la nube. |
 | [docs/authentication.md](docs/authentication.md) | Flujos de login (online/offline/primer-login), gracia de 7 días, captura de token, cifrado. |
 | [docs/synchronization.md](docs/synchronization.md) | Cadencia de sync, upload de pendientes, descarga de catálogo, resolución de conflictos. |
+| [docs/releases.md](docs/releases.md) | Instaladores firmados, R2, pipeline entre repositorios y actualización automática. |
 | [docs/modules.md](docs/modules.md) | Referencia archivo-por-archivo: api-client, config-store, token-crypto, preload, renderer. |
 
 ## Persistencia local

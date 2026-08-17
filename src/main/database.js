@@ -645,4 +645,26 @@ function closeDatabase() {
   if (db) { _persist(); db.close(); db = null; }
 }
 
-module.exports = { initDatabase, getDb, closeDatabase };
+function backupDatabaseForUpdate(targetVersion) {
+  if (!db) throw new Error('Database not initialized');
+  _persist();
+  if (!dbPath || !fs.existsSync(dbPath)) return null;
+
+  const safeVersion = String(targetVersion || 'unknown').replace(/[^0-9A-Za-z.-]/g, '_');
+  const backupDir = path.join(app.getPath('userData'), 'backups');
+  fs.mkdirSync(backupDir, { recursive: true });
+  const backupPath = path.join(backupDir, `pre-update-${safeVersion}-${Date.now()}.db`);
+  fs.copyFileSync(dbPath, backupPath);
+
+  const backups = fs.readdirSync(backupDir)
+    .filter((name) => /^pre-update-.*\.db$/.test(name))
+    .map((name) => ({ name, mtime: fs.statSync(path.join(backupDir, name)).mtimeMs }))
+    .sort((a, b) => b.mtime - a.mtime);
+  for (const stale of backups.slice(2)) {
+    fs.unlinkSync(path.join(backupDir, stale.name));
+  }
+  console.log('[DB] Pre-update backup created at', backupPath);
+  return backupPath;
+}
+
+module.exports = { initDatabase, getDb, closeDatabase, backupDatabaseForUpdate };

@@ -11,16 +11,18 @@ const path = require('path');
 const fs   = require('fs');
 const { pathToFileURL } = require('url');
 const configStore = require('./config-store');
-const { initDatabase, getDb, closeDatabase } = require('./database');
+const { initDatabase, getDb, closeDatabase, backupDatabaseForUpdate } = require('./database');
 const { apiClient } = require('./api-client');
 const { authService } = require('./auth-service');
 const { SyncService } = require('./sync-service');
 const { startLocalServer, stopLocalServer, getServerPort, loginEvents } = require('./local-server');
 const { encryptToken, decryptToken } = require('./token-crypto');
 const imageCache = require('./image-cache');
+const { createUpdateService } = require('./update-service');
 
 let mainWindow = null;
 let syncService = null;
+let updateService = null;
 let isOffline = false;
 let onlineCheckTimer = null;
 let tokenWatcherTimer = null;
@@ -547,6 +549,16 @@ function registerIpcHandlers() {
     }
   });
 
+  ipcMain.handle('updater:status', (event) => {
+    if (!isTrustedSender(event) || !updateService) return { state: 'disabled' };
+    return updateService.getStatus();
+  });
+
+  ipcMain.handle('updater:check', async (event) => {
+    if (!isTrustedSender(event) || !updateService) return { state: 'disabled' };
+    return updateService.checkForUpdates({ force: true });
+  });
+
   // ── Printer IPC ──────────────────────────────────────────
   // Permite al cajero ver/elegir la impresora conectada e imprimir el comprobante fiscal
   // (PDF generado por el backend en el formato configurado) en silencio a esa impresora.
@@ -857,7 +869,13 @@ function buildMenu() {
             if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.toggleDevTools();
           },
         }, { type: 'separator' }] : []),
-        { role: 'quit', label: 'Salir' },
+        {
+          label: 'Salir',
+          click: () => {
+            if (mainWindow && !mainWindow.isDestroyed()) mainWindow.close();
+            else app.quit();
+          },
+        },
       ],
     },
   ];
@@ -994,6 +1012,7 @@ app.whenReady().then(async () => {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('sync-status', status);
     }
+    if (status.online && updateService) updateService.checkForUpdates().catch(() => {});
   });
   syncService.on('sync-complete', (results) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1003,12 +1022,23 @@ app.whenReady().then(async () => {
   syncService.on('products-updated', () => { console.log('[MAIN] Products updated from sync'); });
   if (apiClient.token) syncService.start();
 
+  // Signed desktop updates. Disabled in dev/unpackaged runs.
+  updateService = createUpdateService();
+  updateService.on('status', (status) => {
+    console.log(`[UPDATER] ${status.state}${status.availableVersion ? ` v${status.availableVersion}` : ''}`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('updater:status', status);
+    }
+  });
+  updateService.start({ disabled: configStore.isDev() });
+
   // 10. Load the app — web frontend (online) or fallback (offline)
   //     Cached token is injected by the preload script.
   await loadApp();
 });
 
 app.on('window-all-closed', async () => {
+  if (updateService) updateService.stop();
   stopOnlineCheck();
   stopTokenWatcher();
   // R4-#42: detener el scheduler y ESPERAR a que un _tick en vuelo termine (hasta 3s) antes de cerrar
@@ -1021,6 +1051,9 @@ app.on('window-all-closed', async () => {
     db.run("DELETE FROM app_config WHERE key = 'roles'"); // R4-#37: roles no deben sobrevivir a otro login
     db.run("UPDATE users SET last_token = NULL"); // A10: que el login offline no reuse el token tras cerrar la app
     db.save();
+    if (updateService) {
+      await updateService.prepareForShutdown(backupDatabaseForUpdate);
+    }
   } catch { /* best-effort */ }
   await imageCache.shutdown();
   await stopLocalServer();
