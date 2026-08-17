@@ -34,6 +34,9 @@ jobs:
       R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
       R2_BUCKET: nuventa-pos-releases
       R2_PUBLIC_BASE_URL: https://descargas.nuventa.com.ar
+      MS_STORE_PACKAGE_NAME: ${{ secrets.MS_STORE_PACKAGE_NAME }}
+      MS_STORE_PUBLISHER: ${{ secrets.MS_STORE_PUBLISHER }}
+      MS_STORE_PUBLISHER_DISPLAY_NAME: ${{ secrets.MS_STORE_PUBLISHER_DISPLAY_NAME }}
 
     steps:
       - name: Checkout POS
@@ -109,6 +112,11 @@ jobs:
           }
           npm run build:release
 
+      - name: Build unsigned Microsoft Store MSIX
+        if: ${{ env.MS_STORE_PACKAGE_NAME != '' }}
+        shell: pwsh
+        run: npm run build:store -- -SkipFrontendBuild
+
       - name: Publish atomically to Cloudflare R2
         shell: pwsh
         run: |
@@ -133,4 +141,6 @@ jobs:
             dist/Nuventa-POS-Setup-${{ steps.version.outputs.version }}.exe.blockmap
             dist/latest.yml
             dist/release.json
+            dist/store/*.msix
+          if-no-files-found: error
           retention-days: 30

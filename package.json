@@ -13,6 +13,7 @@
     "build:web": "node scripts/build-web.js",
     "build": "npm run build:web && electron-builder --win",
     "build:release": "npm run build:web && electron-builder --win nsis --publish never",
+    "build:store": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-store.ps1",
     "build:portable": "npm run build:web && electron-builder --win portable"
   },
   "author": "Nuventa",
@@ -23,6 +24,7 @@
     "sql.js": "^1.11.0"
   },
   "devDependencies": {
+    "@microsoft/winappcli": "0.6.0",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8"
   },

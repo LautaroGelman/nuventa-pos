@@ -27,6 +27,7 @@ habilita al cerrar únicamente después de guardar y respaldar SQLite.
 | POS | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_ENDPOINT_URL` | Publicación S3-compatible en R2. |
 | POS | `FRONTEND_REPOSITORY_TOKEN` | Checkout del commit exacto del frontend. |
 | Frontend | `POS_RELEASE_DISPATCH_TOKEN` | Evento `frontend_main_updated` hacia el POS. |
+| POS | `MS_STORE_PACKAGE_NAME` / `MS_STORE_PUBLISHER` / `MS_STORE_PUBLISHER_DISPLAY_NAME` | Identidad exacta de Partner Center para generar el MSIX. |
 
 Los tokens fine-grained deben limitarse al repositorio y permiso mínimos indicados. El environment
 `production` del POS no requiere aprobación manual porque el canal estable elegido es automático.

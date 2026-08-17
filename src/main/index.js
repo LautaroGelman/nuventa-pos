@@ -19,6 +19,7 @@ const { startLocalServer, stopLocalServer, getServerPort, loginEvents } = requir
 const { encryptToken, decryptToken } = require('./token-crypto');
 const imageCache = require('./image-cache');
 const { createUpdateService } = require('./update-service');
+const { isMicrosoftStoreDistribution } = require('./distribution');
 
 let mainWindow = null;
 let syncService = null;
@@ -1022,7 +1023,8 @@ app.whenReady().then(async () => {
   syncService.on('products-updated', () => { console.log('[MAIN] Products updated from sync'); });
   if (apiClient.token) syncService.start();
 
-  // Signed desktop updates. Disabled in dev/unpackaged runs.
+  // The Microsoft Store owns updates for MSIX installs. Direct NSIS installs
+  // keep using electron-updater through the Nuventa R2 release feed.
   updateService = createUpdateService();
   updateService.on('status', (status) => {
     console.log(`[UPDATER] ${status.state}${status.availableVersion ? ` v${status.availableVersion}` : ''}`);
@@ -1030,7 +1032,7 @@ app.whenReady().then(async () => {
       mainWindow.webContents.send('updater:status', status);
     }
   });
-  updateService.start({ disabled: configStore.isDev() });
+  updateService.start({ disabled: configStore.isDev() || isMicrosoftStoreDistribution() });
 
   // 10. Load the app — web frontend (online) or fallback (offline)
   //     Cached token is injected by the preload script.
