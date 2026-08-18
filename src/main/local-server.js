@@ -407,6 +407,45 @@ function quarantineLocalCashSession(db, session, reason) {
   `, [businessNowIso(), String(reason || 'La sesión local no coincide con la nube.'), session.id]);
 }
 
+/**
+ * Una caja puede quedar ocupada localmente por un turno que ya fue cerrado desde otro equipo.
+ * Sólo se puede reconciliar automáticamente cuando la sesión ya existe en cloud y no conserva
+ * operaciones locales sin sincronizar. La apertura cloud exitosa será la confirmación final de
+ * que ese turno dejó de ocupar la caja.
+ */
+function hasUnsyncedCashSessionActivity(db, sessionId) {
+  const id = Number(sessionId);
+  if (!Number.isSafeInteger(id) || id <= 0) return true;
+
+  const pending = db.get(`
+    SELECT
+      (SELECT COUNT(*) FROM sales
+        WHERE cash_session_id = ? AND COALESCE(sync_status, 'pending') != 'synced') +
+      (SELECT COUNT(*) FROM returns
+        WHERE cash_session_id = ? AND COALESCE(sync_status, 'pending') != 'synced') +
+      (SELECT COUNT(*) FROM cash_movements
+        WHERE cash_session_id = ? AND COALESCE(sync_status, 'pending') != 'synced') AS count
+  `, [id, id, id]);
+  return Number(pending?.count) > 0;
+}
+
+function reconcileStaleRegisterOccupant(db, session) {
+  if (!session?.id) return;
+  db.run(`
+    UPDATE cash_sessions
+       SET status = 'FORCED_CLOSE',
+           closing_time = COALESCE(closing_time, ?),
+           sync_status = 'synced',
+           sync_error = ?,
+           synced_at = datetime('now','localtime')
+     WHERE id = ? AND status = 'OPEN'
+  `, [
+    businessNowIso(),
+    'Reconciliada automáticamente: la nube confirmó una nueva apertura para esta caja.',
+    session.id,
+  ]);
+}
+
 function linkOrMirrorCloudCashSession(db, localSession, cloudSession) {
   const scope = getCurrentCashScope(db);
   if (!scope || !cloudSession || cloudSession.status !== 'OPEN') return null;
@@ -1619,13 +1658,21 @@ handlers['POST /cash-sessions/open'] = async (req, res, body) => {
     return jsonResponse(res, 409, { error: 'La caja seleccionada no existe o está inactiva.' });
   }
 
-  const localRegisterOccupant = db.get(
-    "SELECT employee_name FROM cash_sessions WHERE status = 'OPEN' AND cash_register_id = ? LIMIT 1",
-    [cashRegisterId]
-  );
-  if (localRegisterOccupant) {
+  const scope = getCurrentCashScope(db);
+  const localRegisterOccupants = scope ? db.all(`
+    SELECT * FROM cash_sessions
+     WHERE status = 'OPEN'
+       AND cash_register_id = ?
+       AND client_id = ?
+       AND sucursal_id = ?
+     ORDER BY opening_time ASC, id ASC
+  `, [cashRegisterId, scope.clientId, scope.sucursalId]) : [];
+  const unsafeLocalOccupant = localRegisterOccupants.find((session) => (
+    !session.cloud_id || hasUnsyncedCashSessionActivity(db, session.id)
+  ));
+  if (unsafeLocalOccupant) {
     return jsonResponse(res, 409, {
-      error: `La caja seleccionada ya está ocupada${localRegisterOccupant.employee_name ? ` por ${localRegisterOccupant.employee_name}` : ''}.`,
+      error: `La caja tiene una sesión local pendiente${unsafeLocalOccupant.employee_name ? ` de ${unsafeLocalOccupant.employee_name}` : ''}. Sincronizala o cerrala antes de volver a abrir.`,
     });
   }
 
@@ -1656,6 +1703,21 @@ handlers['POST /cash-sessions/open'] = async (req, res, body) => {
       return jsonResponse(res, cloudError.status, { error: cloudError.message });
     }
     console.log('[LOCAL-API] Cloud register reservation unavailable, opening offline:', err.message);
+  }
+
+  // Sin confirmación cloud no se puede decidir si una sesión de otro cajero sigue vigente. Esto
+  // mantiene la exclusión mutua al abrir offline. Si cloud aceptó la apertura, en cambio, confirmó
+  // que las filas locales anteriores eran obsoletas y se conservan como cierres reconciliados.
+  if (!cloudSession && localRegisterOccupants.length > 0) {
+    const occupant = localRegisterOccupants[0];
+    return jsonResponse(res, 409, {
+      error: `La caja seleccionada ya está ocupada localmente${occupant.employee_name ? ` por ${occupant.employee_name}` : ''}. Conectate para verificar su estado antes de abrirla.`,
+    });
+  }
+  if (cloudSession) {
+    for (const occupant of localRegisterOccupants) {
+      reconcileStaleRegisterOccupant(db, occupant);
+    }
   }
 
   const amount = cloudSession?.initialAmount

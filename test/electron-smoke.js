@@ -128,6 +128,17 @@ async function run() {
     assert.equal(quarantined.status, 'FORCED_CLOSE');
     assert.equal(quarantined.sync_status, 'needs_review');
 
+    // Regresión: otro cajero puede dejar una fila OPEN local aunque cloud ya haya cerrado ese turno
+    // (por ejemplo, si se cerró desde el navegador). Un rechazo cloud debe conservarla; una apertura
+    // cloud exitosa confirma que quedó obsoleta y permite reconciliarla sin perder auditoría.
+    db.run(`
+      INSERT INTO cash_sessions (cloud_id, client_session_uuid, client_id, sucursal_id, employee_id,
+        employee_name, status, business_date, opening_time, initial_amount, expected_amount,
+        cash_register_id, cash_register_name, sync_status)
+      VALUES (9001, 'other-employee-stale-smoke', 1, 1, 7, 'Otro cajero', 'OPEN',
+        '2026-08-08', '2026-08-08T10:00:00', 100, 100, 77, 'Caja Smoke', 'pending')
+    `);
+
     const occupiedOpen = await fetch(`${branchUrl}/cash-sessions/open`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -135,13 +146,17 @@ async function run() {
     });
     assert.equal(occupiedOpen.status, 409);
     assert.match(await occupiedOpen.text(), /Caja ocupada por otro cajero/);
-    assert.equal(db.get("SELECT COUNT(*) AS cnt FROM cash_sessions WHERE status = 'OPEN'").cnt, 0);
+    assert.equal(db.get("SELECT status FROM cash_sessions WHERE cloud_id = 9001").status, 'OPEN');
 
-    apiClient.isOnline = originalOnline;
-    apiClient.getCurrentSession = originalGetCurrentSession;
-    apiClient.openSession = originalOpenSession;
-    apiClient.token = originalToken;
-    apiClient.lastHeartbeatAuthed = originalHeartbeat;
+    apiClient.openSession = async ({ initialAmount }) => ({
+      id: 9002,
+      status: 'OPEN',
+      initialAmount,
+      expectedAmount: initialAmount,
+      cashRegisterId: 77,
+      cashRegisterName: 'Caja Smoke',
+      employeeName: 'Cajero Smoke',
+    });
 
     const opened = await fetch(`${branchUrl}/cash-sessions/open`, {
       method: 'POST',
@@ -149,6 +164,17 @@ async function run() {
       body: JSON.stringify({ cashRegisterId: 77, initialAmount: 0 }),
     });
     assert.equal(opened.status, 200, await opened.text());
+    const reconciledOccupant = db.get("SELECT status, sync_status, sync_error FROM cash_sessions WHERE cloud_id = 9001");
+    assert.equal(reconciledOccupant.status, 'FORCED_CLOSE');
+    assert.equal(reconciledOccupant.sync_status, 'synced');
+    assert.match(reconciledOccupant.sync_error, /Reconciliada automáticamente/);
+    assert.equal(db.get("SELECT COUNT(*) AS cnt FROM cash_sessions WHERE status = 'OPEN'").cnt, 1);
+
+    apiClient.isOnline = originalOnline;
+    apiClient.getCurrentSession = originalGetCurrentSession;
+    apiClient.openSession = originalOpenSession;
+    apiClient.token = originalToken;
+    apiClient.lastHeartbeatAuthed = originalHeartbeat;
 
     // Regresión: los builds anteriores omitían cashRegisterId en la venta estándar. El servidor
     // local debe heredarlo del turno abierto para que el sync pueda crear/vincular la sesión cloud.
