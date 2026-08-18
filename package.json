@@ -24,9 +24,11 @@
     "sql.js": "^1.11.0"
   },
   "devDependencies": {
-    "@microsoft/winappcli": "0.6.0",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8"
+  },
+  "optionalDependencies": {
+    "@microsoft/winappcli": "0.6.0"
   },
   "overrides": {
     "js-yaml": "4.3.1"
