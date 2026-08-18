@@ -70,6 +70,16 @@ contextBridge.exposeInMainWorld('nuventaSync', {
   },
 });
 
+contextBridge.exposeInMainWorld('nuventaUpdater', {
+  getStatus: () => ipcRenderer.invoke('updater:status'),
+  check: () => ipcRenderer.invoke('updater:check'),
+  onStatus: (callback) => {
+    const handler = (_event, data) => callback(data);
+    ipcRenderer.on('updater:status', handler);
+    return () => ipcRenderer.removeListener('updater:status', handler);
+  },
+});
+
 // ── Impresora térmica / fiscal ──────────────────────────────
 // Permite que la app web (corriendo dentro del POS) liste las impresoras conectadas, recuerde
 // la elegida por equipo e imprima el PDF del comprobante en silencio. En un navegador normal

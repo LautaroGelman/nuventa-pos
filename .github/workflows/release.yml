@@ -1,0 +1,146 @@
+name: Release Windows POS
+
+on:
+  push:
+    branches: [master]
+  repository_dispatch:
+    types: [frontend_main_updated]
+  workflow_dispatch:
+    inputs:
+      frontend_sha:
+        description: Frontend commit to package (defaults to main)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nuventa-pos-stable-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    environment: production
+    env:
+      NUVENTA_FRONTEND_DIR: ${{ github.workspace }}\frontend
+      ALLOW_UNSIGNED_RELEASE: ${{ vars.POS_ALLOW_UNSIGNED_RELEASE == 'true' && 'true' || 'false' }}
+      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: auto
+      R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
+      R2_BUCKET: nuventa-pos-releases
+      R2_PUBLIC_BASE_URL: https://descargas.nuventa.com.ar
+      MS_STORE_PACKAGE_NAME: ${{ secrets.MS_STORE_PACKAGE_NAME }}
+      MS_STORE_PUBLISHER: ${{ secrets.MS_STORE_PUBLISHER }}
+      MS_STORE_PUBLISHER_DISPLAY_NAME: ${{ secrets.MS_STORE_PUBLISHER_DISPLAY_NAME }}
+
+    steps:
+      - name: Checkout POS
+        uses: actions/checkout@v4
+
+      - name: Resolve frontend commit
+        id: frontend
+        shell: pwsh
+        run: |
+          $sha = '${{ github.event.client_payload.frontend_sha }}'
+          if ([string]::IsNullOrWhiteSpace($sha)) { $sha = '${{ inputs.frontend_sha }}' }
+          if ([string]::IsNullOrWhiteSpace($sha)) { $sha = 'main' }
+          "sha=$sha" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Checkout exact frontend
+        uses: actions/checkout@v4
+        with:
+          repository: LautaroGelman/nuventa-frontend
+          ref: ${{ steps.frontend.outputs.sha }}
+          token: ${{ secrets.FRONTEND_REPOSITORY_TOKEN }}
+          path: frontend
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Validate release secrets
+        shell: pwsh
+        run: |
+          $required = @('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'R2_ENDPOINT_URL')
+          if ($env:ALLOW_UNSIGNED_RELEASE -ne 'true') {
+            $required += @('CSC_LINK', 'CSC_KEY_PASSWORD')
+          } else {
+            Write-Warning 'TEST MODE: the installer will be published without an Authenticode signature.'
+          }
+          foreach ($name in $required) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              throw "Missing production secret: $name"
+            }
+          }
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          pnpm --dir frontend install --frozen-lockfile
+
+      - name: Assign monotonic release version
+        id: version
+        shell: pwsh
+        run: |
+          $version = "1.0.${{ github.run_number }}"
+          npm version $version --no-git-tag-version
+          "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
+
+      - name: Test POS and frontend
+        shell: pwsh
+        run: |
+          npm run check
+          pnpm --dir frontend test
+
+      - name: Build NSIS installer
+        shell: pwsh
+        run: |
+          if ($env:ALLOW_UNSIGNED_RELEASE -eq 'true') {
+            $env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
+            Remove-Item Env:CSC_LINK,Env:CSC_KEY_PASSWORD -ErrorAction SilentlyContinue
+          }
+          npm run build:release
+
+      - name: Build unsigned Microsoft Store MSIX
+        if: ${{ env.MS_STORE_PACKAGE_NAME != '' }}
+        shell: pwsh
+        run: npm run build:store -- -SkipFrontendBuild
+
+      - name: Publish atomically to Cloudflare R2
+        shell: pwsh
+        run: |
+          $frontendCommit = git -C frontend rev-parse HEAD
+          $posCommit = git rev-parse HEAD
+          $publishArgs = @{
+            Version = '${{ steps.version.outputs.version }}'
+            FrontendCommit = $frontendCommit
+            PosCommit = $posCommit
+          }
+          if ($env:ALLOW_UNSIGNED_RELEASE -eq 'true') {
+            $publishArgs.AllowUnsigned = $true
+          }
+          ./scripts/publish-release.ps1 @publishArgs
+
+      - name: Keep release evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: nuventa-pos-${{ steps.version.outputs.version }}
+          path: |
+            dist/Nuventa-POS-Setup-${{ steps.version.outputs.version }}.exe
+            dist/Nuventa-POS-Setup-${{ steps.version.outputs.version }}.exe.blockmap
+            dist/latest.yml
+            dist/release.json
+            dist/store/*.msix
+          if-no-files-found: error
+          retention-days: 30

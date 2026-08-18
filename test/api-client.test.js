@@ -4,6 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { ApiClient } = require('../src/main/api-client');
 
+test('usa la API cloud dedicada como destino seguro por defecto', () => {
+  const client = new ApiClient();
+  assert.equal(client.baseUrl, 'https://api.nuventa.com.ar');
+});
+
 test('normaliza la sucursal activa y construye rutas válidas', () => {
   const client = new ApiClient();
   client.setBaseUrl('http://localhost:8080/');
@@ -30,6 +35,13 @@ test('cambiar de sucursal invalida el ciclo de sincronización en vuelo', () => 
 
   assert.equal(client.sucursalId, 2);
   assert.equal(client.authEpoch, epoch + 1);
+});
+
+test('identifica versión y contrato POS en cada request cloud', () => {
+  const client = new ApiClient();
+  const headers = client._headers();
+  assert.match(headers['X-Nuventa-POS-Version'], /^\d+\.\d+\.\d+/);
+  assert.equal(headers['X-Nuventa-POS-Contract'], '1');
 });
 
 test('consulta la disponibilidad autoritativa de cajas de la sucursal activa', async () => {

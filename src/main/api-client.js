@@ -6,6 +6,9 @@ const CONFIG_DEFAULTS = {
   baseUrl: 'https://api.nuventa.com.ar',
 };
 
+const POS_VERSION = require('../../package.json').version;
+const POS_CONTRACT_VERSION = String(require('../../pos-contract.json').contractVersion);
+
 const EventEmitter = require('events');
 
 class ApiClient extends EventEmitter {
@@ -51,7 +54,11 @@ class ApiClient extends EventEmitter {
   }
 
   _headers() {
-    const h = { 'Content-Type': 'application/json' };
+    const h = {
+      'Content-Type': 'application/json',
+      'X-Nuventa-POS-Version': POS_VERSION,
+      'X-Nuventa-POS-Contract': POS_CONTRACT_VERSION,
+    };
     if (this.token) h['Authorization'] = `Bearer ${this.token}`;
     return h;
   }

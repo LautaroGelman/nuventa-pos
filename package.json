@@ -1,6 +1,6 @@
 {
   "name": "nuventa-pos",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "description": "Nuventa POS - Punto de Venta Offline-First para Windows",
   "main": "src/main/index.js",
   "scripts": {
@@ -8,21 +8,28 @@
     "start:dev": "electron . --dev",
     "test": "node --test test/*.test.js",
     "test:smoke": "node test/run-electron-smoke.js",
-    "check": "node --check src/main/api-client.js && node --check src/main/auth-service.js && node --check src/main/index.js && node --check src/main/sync-service.js && node --check src/main/image-cache.js && node --check src/main/local-server.js && node --test test/*.test.js",
-    "build:frontend": "cd ../nuventa-frontend-dev && pnpm build",
-    "build:web": "npm run build:frontend && node -e \"const{cpSync,rmSync,mkdirSync}=require('fs');const src='../nuventa-frontend-dev/out';const dst='resources/web';rmSync(dst,{recursive:true,force:true});mkdirSync(dst,{recursive:true});cpSync(src,dst,{recursive:true});console.log('Web assets copied to',dst);\"",
+    "check": "node --check src/main/api-client.js && node --check src/main/auth-service.js && node --check src/main/index.js && node --check src/main/sync-service.js && node --check src/main/update-service.js && node --check src/main/image-cache.js && node --check src/main/local-server.js && node --test test/*.test.js",
+    "build:frontend": "node scripts/build-web.js --build-only",
+    "build:web": "node scripts/build-web.js",
     "build": "npm run build:web && electron-builder --win",
+    "build:release": "npm run build:web && electron-builder --win nsis --publish never",
+    "build:store": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-store.ps1",
     "build:portable": "npm run build:web && electron-builder --win portable"
   },
   "author": "Nuventa",
   "license": "UNLICENSED",
   "private": true,
   "dependencies": {
+    "electron-updater": "^6.6.2",
     "sql.js": "^1.11.0"
   },
   "devDependencies": {
+    "@microsoft/winappcli": "0.6.0",
     "electron": "^33.2.0",
     "electron-builder": "^25.1.8"
+  },
+  "overrides": {
+    "js-yaml": "4.3.1"
   },
   "build": {
     "appId": "com.nuventa.pos",
@@ -40,8 +47,16 @@
       "installerIcon": "assets/icon.ico",
       "artifactName": "Nuventa-POS-Setup-${version}.${ext}"
     },
+    "publish": [
+      {
+        "provider": "generic",
+        "url": "https://descargas.nuventa.com.ar/stable",
+        "channel": "latest"
+      }
+    ],
     "files": [
       "src/**/*",
+      "pos-contract.json",
       "assets/**/*",
       "resources/web/**/*",
       "node_modules/sql.js/dist/**/*"

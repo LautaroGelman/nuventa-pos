@@ -524,6 +524,7 @@ async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false, 
   const cloudUrl = `${apiClient.baseUrl}${fullUrl}`;
 
   const headers = {
+    ...apiClient._headers(),
     'Content-Type': rawBody ? (req.headers['content-type'] || 'application/octet-stream') : 'application/json',
     'Authorization': `Bearer ${token}`,
   };

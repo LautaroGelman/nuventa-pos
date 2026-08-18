@@ -1,0 +1,26 @@
+{
+  "rules": [
+    {
+      "allowed": {
+        "origins": [
+          "https://nuventa.com.ar",
+          "https://www.nuventa.com.ar",
+          "https://app.nuventa.com.ar"
+        ],
+        "methods": [
+          "GET",
+          "HEAD"
+        ],
+        "headers": [
+          "*"
+        ]
+      },
+      "exposeHeaders": [
+        "ETag",
+        "Content-Length",
+        "Content-Disposition"
+      ],
+      "maxAgeSeconds": 3600
+    }
+  ]
+}
