@@ -7,12 +7,12 @@ const { app } = require('electron');
 
 // ── Environment detection ────────────────────────────────
 // --dev flag  → dev mode  (localhost:3000 + localhost:8080)
-// otherwise   → prod mode (nuventa.com.ar)
+// otherwise   → prod mode (web on nuventa.com.ar, API on api.nuventa.com.ar)
 const _isDev = process.argv.includes('--dev');
 
 const ENV_URLS = {
   dev:  { webAppUrl: 'http://localhost:3000', backendApiUrl: 'http://localhost:8080' },
-  prod: { webAppUrl: 'https://nuventa.com.ar', backendApiUrl: 'https://nuventa.com.ar' },
+  prod: { webAppUrl: 'https://nuventa.com.ar', backendApiUrl: 'https://api.nuventa.com.ar' },
 };
 
 function isDev() { return _isDev; }

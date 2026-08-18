@@ -4,6 +4,11 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { ApiClient } = require('../src/main/api-client');
 
+test('usa la API cloud dedicada como destino seguro por defecto', () => {
+  const client = new ApiClient();
+  assert.equal(client.baseUrl, 'https://api.nuventa.com.ar');
+});
+
 test('normaliza la sucursal activa y construye rutas válidas', () => {
   const client = new ApiClient();
   client.setBaseUrl('http://localhost:8080/');
