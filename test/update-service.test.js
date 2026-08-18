@@ -10,10 +10,12 @@ class FakeUpdater extends EventEmitter {
     super();
     this.checks = 0;
     this.autoInstallOnAppQuit = false;
+    this.installCalls = [];
   }
 
   setFeedURL(config) { this.feed = config; }
   async checkForUpdates() { this.checks += 1; }
+  quitAndInstall(isSilent, isForceRunAfter) { this.installCalls.push([isSilent, isForceRunAfter]); }
 }
 
 function createService({ packaged = true } = {}) {
@@ -59,8 +61,12 @@ test('solo habilita la instalación al salir después del respaldo', async () =>
 
   assert.equal(prepared, true);
   assert.equal(backedUpVersion, '1.0.2');
-  assert.equal(updater.autoInstallOnAppQuit, true);
+  assert.equal(updater.autoInstallOnAppQuit, false);
+  assert.deepEqual(updater.installCalls, []);
   assert.equal(service.getStatus().state, 'installing');
+  assert.equal(service.installDownloadedUpdate(), true);
+  assert.deepEqual(updater.installCalls, [[true, false]]);
+  assert.equal(service.installDownloadedUpdate(), false);
   service.stop();
 });
 
@@ -74,6 +80,8 @@ test('pospone la instalación si el respaldo falla', async () => {
 
   assert.equal(prepared, false);
   assert.equal(updater.autoInstallOnAppQuit, false);
+  assert.equal(service.installDownloadedUpdate(), false);
+  assert.deepEqual(updater.installCalls, []);
   assert.match(service.getStatus().error, /disco lleno/);
   service.stop();
 });

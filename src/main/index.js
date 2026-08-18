@@ -1040,6 +1040,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', async () => {
+  let updatePrepared = false;
   if (updateService) updateService.stop();
   stopOnlineCheck();
   stopTokenWatcher();
@@ -1054,12 +1055,13 @@ app.on('window-all-closed', async () => {
     db.run("UPDATE users SET last_token = NULL"); // A10: que el login offline no reuse el token tras cerrar la app
     db.save();
     if (updateService) {
-      await updateService.prepareForShutdown(backupDatabaseForUpdate);
+      updatePrepared = await updateService.prepareForShutdown(backupDatabaseForUpdate);
     }
   } catch { /* best-effort */ }
   await imageCache.shutdown();
   await stopLocalServer();
   closeDatabase();
+  if (updatePrepared && updateService.installDownloadedUpdate()) return;
   app.quit();
 });
 

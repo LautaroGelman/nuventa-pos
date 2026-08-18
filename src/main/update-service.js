@@ -23,6 +23,7 @@ class UpdateService extends EventEmitter {
     this._checkPromise = null;
     this._lastCheckAt = 0;
     this._downloadedVersion = null;
+    this._installationPrepared = false;
     this._status = {
       state: 'idle',
       currentVersion: app.getVersion(),
@@ -57,6 +58,7 @@ class UpdateService extends EventEmitter {
     });
     this.autoUpdater.on('update-downloaded', (info) => {
       this._downloadedVersion = info.version;
+      this._installationPrepared = false;
       this._setStatus({ state: 'ready', availableVersion: info.version, percent: 100, error: null });
     });
     this.autoUpdater.on('error', (error) => {
@@ -97,17 +99,32 @@ class UpdateService extends EventEmitter {
 
   async prepareForShutdown(createBackup) {
     if (!this._downloadedVersion) return false;
+    this._installationPrepared = false;
     try {
       await createBackup(this._downloadedVersion);
-      this.autoUpdater.autoInstallOnAppQuit = true;
+      this._installationPrepared = true;
       this._setStatus({ state: 'installing' });
       return true;
     } catch (error) {
-      this.autoUpdater.autoInstallOnAppQuit = false;
       this._setStatus({
         state: 'error',
         error: `La actualización se pospuso porque no se pudo respaldar la base: ${error.message}`,
       });
+      return false;
+    }
+  }
+
+  installDownloadedUpdate() {
+    if (!this._downloadedVersion || !this._installationPrepared) return false;
+    this._installationPrepared = false;
+    try {
+      // autoInstallOnAppQuit was disabled before the download, so electron-updater
+      // did not register its quit handler. Install explicitly only after callers
+      // have closed SQLite and the rest of the local services.
+      this.autoUpdater.quitAndInstall(true, false);
+      return true;
+    } catch (error) {
+      this._setStatus({ state: 'error', error: error?.message || 'No se pudo instalar la actualizaciÃ³n.' });
       return false;
     }
   }
