@@ -200,6 +200,20 @@ class SyncService extends EventEmitter {
     await this._tick();
   }
 
+  /**
+   * Apagado seguro: cancela los timers, deja terminar cualquier ciclo que ya estaba en vuelo y
+   * ejecuta un ciclo final completo antes de que el proceso principal borre el token o cierre SQLite.
+   */
+  async syncBeforeShutdown() {
+    this.stop();
+    while (this._running) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    await this._tick();
+    // Un intento offline agenda un retry; al cerrar no debe mantener vivo el proceso.
+    this.stop();
+  }
+
   getStatus() {
     const db = getDb();
     const pendingSales = db.get("SELECT COUNT(*) as cnt FROM sales WHERE sync_status = 'pending'");

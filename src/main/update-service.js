@@ -10,6 +10,7 @@ const EventEmitter = require('events');
 const DEFAULT_FEED_URL = 'https://descargas.nuventa.com.ar/stable';
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const MIN_CHECK_GAP_MS = 5 * 60 * 1000;
+const SHUTDOWN_UPDATE_WAIT_MS = 2 * 60 * 1000;
 
 class UpdateService extends EventEmitter {
   constructor({ autoUpdater, app, feedUrl = DEFAULT_FEED_URL, now = () => Date.now() }) {
@@ -97,6 +98,41 @@ class UpdateService extends EventEmitter {
     return this.getStatus();
   }
 
+  /**
+   * Hace el chequeo final al cerrar y, si aparece una versión nueva, permite que la descarga
+   * termine antes de apagar Electron. Sin esta espera, checkForUpdates() iniciaba autoDownload
+   * pero el proceso se cerraba inmediatamente y la actualización no llegaba a prepararse.
+   */
+  async checkForUpdatesBeforeShutdown({ timeoutMs = SHUTDOWN_UPDATE_WAIT_MS } = {}) {
+    await this.checkForUpdates({ force: true });
+
+    const current = this.getStatus();
+    if (this._downloadedVersion || current.state !== 'downloading') return current;
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (status, extra = {}) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.removeListener('status', onStatus);
+        resolve({ ...status, ...extra });
+      };
+      const onStatus = (status) => {
+        if (status.state === 'ready' || status.state === 'error' || status.state === 'up-to-date') {
+          finish(status);
+        }
+      };
+      const timer = setTimeout(() => {
+        finish(this.getStatus(), { shutdownWaitTimedOut: true });
+      }, Math.max(0, Number(timeoutMs) || 0));
+
+      this.on('status', onStatus);
+      // Cierra la ventana de carrera entre el chequeo de estado anterior y el alta del listener.
+      onStatus(this.getStatus());
+    });
+  }
+
   async prepareForShutdown(createBackup) {
     if (!this._downloadedVersion) return false;
     this._installationPrepared = false;
@@ -149,6 +185,7 @@ module.exports = {
   CHECK_INTERVAL_MS,
   DEFAULT_FEED_URL,
   MIN_CHECK_GAP_MS,
+  SHUTDOWN_UPDATE_WAIT_MS,
   UpdateService,
   createUpdateService,
 };

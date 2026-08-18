@@ -1044,9 +1044,28 @@ app.on('window-all-closed', async () => {
   if (updateService) updateService.stop();
   stopOnlineCheck();
   stopTokenWatcher();
-  // R4-#42: detener el scheduler y ESPERAR a que un _tick en vuelo termine (hasta 3s) antes de cerrar
-  // la DB, para no perder el marcado 'synced' de una venta que ya se creó en la nube.
-  if (syncService) { syncService.stop(); await syncService.drain(3000).catch(() => {}); }
+
+  // Antes de borrar el token o cerrar SQLite, ejecutar SIEMPRE el sync final y consultar el feed.
+  // Ambas tareas son independientes y corren juntas para no alargar innecesariamente el cierre.
+  // Si el chequeo encuentra una versión, espera su descarga (con límite interno) para poder
+  // respaldar la base e instalarla en este mismo apagado.
+  await Promise.all([
+    syncService
+      ? syncService.syncBeforeShutdown().catch((err) => {
+          console.error('[SYNC] No se pudo completar la sincronización final:', err.message);
+        })
+      : Promise.resolve(),
+    updateService
+      ? updateService.checkForUpdatesBeforeShutdown().then((status) => {
+          if (status.shutdownWaitTimedOut) {
+            console.warn('[UPDATER] La descarga no terminó dentro del tiempo de cierre; se reanudará al iniciar.');
+          }
+        }).catch((err) => {
+          console.error('[UPDATER] No se pudo completar el chequeo final:', err.message);
+        })
+      : Promise.resolve(),
+  ]);
+
   // Clear cached token on exit — user must log in again on next launch.
   try {
     const db = getDb();

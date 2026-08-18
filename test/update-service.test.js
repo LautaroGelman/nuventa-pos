@@ -49,6 +49,41 @@ test('serializa y limita las consultas al feed', async () => {
   service.stop();
 });
 
+test('al cerrar espera que termine una actualización descubierta en el chequeo final', async () => {
+  const { service, updater } = createService();
+  service.start();
+  updater.checkForUpdates = async () => {
+    updater.checks += 1;
+    updater.emit('checking-for-update');
+    updater.emit('update-available', { version: '1.0.2' });
+    setTimeout(() => updater.emit('update-downloaded', { version: '1.0.2' }), 15);
+  };
+
+  const status = await service.checkForUpdatesBeforeShutdown({ timeoutMs: 200 });
+
+  assert.equal(updater.checks, 1);
+  assert.equal(status.state, 'ready');
+  assert.equal(status.availableVersion, '1.0.2');
+  service.stop();
+});
+
+test('el chequeo final no bloquea indefinidamente si la descarga no termina', async () => {
+  const { service, updater } = createService();
+  service.start();
+  updater.checkForUpdates = async () => {
+    updater.checks += 1;
+    updater.emit('checking-for-update');
+    updater.emit('update-available', { version: '1.0.2' });
+  };
+
+  const status = await service.checkForUpdatesBeforeShutdown({ timeoutMs: 10 });
+
+  assert.equal(status.state, 'downloading');
+  assert.equal(status.shutdownWaitTimedOut, true);
+  assert.equal(service.listenerCount('status'), 0);
+  service.stop();
+});
+
 test('solo habilita la instalación al salir después del respaldo', async () => {
   const { service, updater } = createService();
   service.start();
