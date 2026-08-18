@@ -119,10 +119,9 @@ function createImageCache(dependencies = {}, optionOverrides = {}) {
     if (fn) fn.call(logger, message);
   };
 
-  const sleep = (ms) => new Promise((resolve) => {
-    const timer = setTimer(resolve, ms);
-    if (timer && timer.unref) timer.unref();
-  });
+  // These delays are awaited by active cache operations. Keeping the timer
+  // referenced prevents Node from exiting while a manifest retry is pending.
+  const sleep = (ms) => new Promise((resolve) => setTimer(resolve, ms));
 
   function getCacheDir() {
     if (!cacheDir) cacheDir = path.join(getUserDataPath(), options.cacheDirName);
