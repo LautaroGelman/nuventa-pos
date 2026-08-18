@@ -1543,6 +1543,29 @@ handlers['GET /cash-sessions/open-preview'] = async (req, res, body, route, quer
   const db = getDb();
   const cashRegisterId = query.cashRegisterId;
 
+  const localClientId = Number(getConfigVal(db, 'client_id')) || null;
+  const localSucursalId = Number(getConfigVal(db, 'sucursal_id')) || null;
+  if ((localClientId != null && Number(route.clientId) !== localClientId)
+      || (localSucursalId != null && Number(route.sucursalId) !== localSucursalId)) {
+    return jsonResponse(res, 403, { error: 'Ruta no permitida desde el POS.' });
+  }
+
+  // La nube es la autoridad para el carry-over: el cierre anterior puede haberse realizado desde
+  // el navegador u otro POS y, por diseño, las sesiones ajenas no se importan a la base local.
+  // Si no hay conectividad real conservamos el preview local para poder seguir operando offline.
+  try {
+    if (apiClient.token && await apiClient.isOnline() && apiClient.lastHeartbeatAuthed) {
+      const cloudPreview = await apiClient.getOpenSessionPreview(cashRegisterId);
+      return jsonResponse(res, 200, cloudPreview);
+    }
+  } catch (err) {
+    const cloudError = parseCloudHttpError(err);
+    if (cloudError) {
+      return jsonResponse(res, cloudError.status, { error: cloudError.message });
+    }
+    console.log('[LOCAL-API] Open preview cloud fetch failed, using local state:', err.message);
+  }
+
   const register = cashRegisterId
     ? db.get('SELECT * FROM cash_registers WHERE id = ?', [cashRegisterId])
     : null;

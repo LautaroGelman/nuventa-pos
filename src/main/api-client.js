@@ -365,6 +365,16 @@ class ApiClient extends EventEmitter {
     return this._fetch(`${this._branchPath()}/cash-sessions/current`);
   }
 
+  async getOpenSessionPreview(cashRegisterId) {
+    const registerId = this._normalizeId(cashRegisterId);
+    if (!registerId) {
+      throw new Error('La caja seleccionada no es válida.');
+    }
+    return this._fetch(
+      `${this._branchPath()}/cash-sessions/open-preview?cashRegisterId=${registerId}`
+    );
+  }
+
   async openSession(body) {
     return this._fetch(`${this._branchPath()}/cash-sessions/open`, {
       method: 'POST',

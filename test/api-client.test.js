@@ -63,6 +63,36 @@ test('consulta la disponibilidad autoritativa de cajas de la sucursal activa', a
   assert.deepEqual(result, [{ occupied: true }]);
 });
 
+test('consulta en la nube el fondo dejado para la próxima apertura', async () => {
+  const client = new ApiClient();
+  client.setBaseUrl('http://localhost:8080');
+  client.setAuth({ token: 'token', clientId: 7, sucursalId: 9, employeeId: 3 });
+  let requestedUrl = null;
+  client._fetch = async (url) => {
+    requestedUrl = url;
+    return { hasCarryOver: true, previousFloatLeft: 5000, suggestedAmount: 5000 };
+  };
+
+  const result = await client.getOpenSessionPreview(12);
+
+  assert.equal(
+    requestedUrl,
+    'http://localhost:8080/api/client-panel/7/sucursales/9/cash-sessions/open-preview?cashRegisterId=12'
+  );
+  assert.deepEqual(result, {
+    hasCarryOver: true,
+    previousFloatLeft: 5000,
+    suggestedAmount: 5000,
+  });
+});
+
+test('no consulta un preview de apertura sin una caja válida', async () => {
+  const client = new ApiClient();
+  client.setAuth({ token: 'token', clientId: 7, sucursalId: 9, employeeId: 3 });
+
+  await assert.rejects(() => client.getOpenSessionPreview('abc'), /caja seleccionada no es válida/i);
+});
+
 test('consulta una venta puntual para iniciar una devolución', async () => {
   const client = new ApiClient();
   client.setBaseUrl('http://localhost:8080');
