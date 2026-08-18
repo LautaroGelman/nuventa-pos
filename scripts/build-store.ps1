@@ -98,13 +98,20 @@ $manifest.Save($manifestPath)
 if ($LASTEXITCODE -ne 0) { throw 'winapp no pudo generar el paquete MSIX.' }
 
 $artifact = Get-Item -LiteralPath $artifactPath
-$hash = Get-FileHash -LiteralPath $artifactPath -Algorithm SHA256
+$sha256 = [System.Security.Cryptography.SHA256]::Create()
+$artifactStream = [System.IO.File]::OpenRead($artifactPath)
+try {
+  $hash = [System.BitConverter]::ToString($sha256.ComputeHash($artifactStream)).Replace('-', '').ToLowerInvariant()
+} finally {
+  $artifactStream.Dispose()
+  $sha256.Dispose()
+}
 [pscustomobject]@{
   Package = $artifact.FullName
   Version = $Version
   Architecture = 'x64'
   Bytes = $artifact.Length
-  SHA256 = $hash.Hash.ToLowerInvariant()
+  SHA256 = $hash
   Signed = $false
   UpdateProvider = 'Microsoft Store'
 } | Format-List
