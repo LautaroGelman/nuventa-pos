@@ -85,9 +85,18 @@ contextBridge.exposeInMainWorld('nuventaUpdater', {
 // la elegida por equipo e imprima el PDF del comprobante en silencio. En un navegador normal
 // `window.nuventaPrinter` no existe → el frontend cae al fallback de descarga/impresión manual.
 contextBridge.exposeInMainWorld('nuventaPrinter', {
+  version: 2,
+  getState: () => ipcRenderer.invoke('printer:get-state'),
+  saveConfig: (config) => ipcRenderer.invoke('printer:save-config', config),
   list: () => ipcRenderer.invoke('printer:list'),
   getSelected: () => ipcRenderer.invoke('printer:get-selected'),
   setSelected: (name) => ipcRenderer.invoke('printer:set-selected', name),
-  // bytes: Uint8Array | ArrayBuffer con el PDF; opts: { deviceName? }
+  // bytes: Uint8Array | ArrayBuffer con el PDF.
   printPdf: (bytes, opts) => ipcRenderer.invoke('printer:print-pdf', bytes, opts),
+  printTicket: (ticket, opts) => ipcRenderer.invoke('printer:print-ticket', ticket, opts),
+  onJobStatus: (callback) => {
+    const handler = (_event, status) => callback(status);
+    ipcRenderer.on('printer:job-status', handler);
+    return () => ipcRenderer.removeListener('printer:job-status', handler);
+  },
 });

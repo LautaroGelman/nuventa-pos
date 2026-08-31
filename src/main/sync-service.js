@@ -38,6 +38,16 @@ function classifySyncError(err) {
   return 'transient';
 }
 
+function delayedInvoiceFromSaleResult(result, requestedInvoice) {
+  const invoice = result?.invoice;
+  if (!requestedInvoice || !invoice?.emitida || !invoice?.cae || !invoice?.invoiceId) return null;
+  return {
+    invoiceId: invoice.invoiceId,
+    numero: invoice.numeroFormateado || '',
+    saleId: result.id || result.saleId || null,
+  };
+}
+
 class SyncService extends EventEmitter {
   constructor() {
     super();
@@ -46,6 +56,7 @@ class SyncService extends EventEmitter {
     this._running    = false;
     this._runAgain   = false;  // branch/login changes can request one follow-up cycle
     this._lastOnline = null;   // last observed connectivity (real, not derived from _running)
+    this._delayedInvoices = []; // facturas emitidas al subir ventas offline; solo se notifican
   }
 
   start() {
@@ -140,6 +151,7 @@ class SyncService extends EventEmitter {
       }
 
       // 1. Upload pending sales (local → cloud)
+      this._delayedInvoices = [];
       const salesSynced = await this._uploadPendingSales();
 
       // 2. Upload pending returns (local → cloud)
@@ -170,6 +182,7 @@ class SyncService extends EventEmitter {
           movements: movementsSynced,
           sessions: sessionsSynced,
           total: totalSynced,
+          delayedInvoices: this._delayedInvoices.slice(),
         });
       }
 
@@ -329,6 +342,11 @@ class SyncService extends EventEmitter {
         };
 
         const result = await apiClient.createSale(payload);
+
+        // Una factura pedida offline puede quedar autorizada recién acá. Nunca se imprime desde el
+        // proceso de sync: se informa al renderer para que el cajero decida si desea reimprimirla.
+        const delayedInvoice = delayedInvoiceFromSaleResult(result, saleInvoice);
+        if (delayedInvoice) this._delayedInvoices.push(delayedInvoice);
 
         db.run(`
           UPDATE sales
@@ -920,4 +938,4 @@ class SyncService extends EventEmitter {
   }
 }
 
-module.exports = { SyncService };
+module.exports = { SyncService, delayedInvoiceFromSaleResult };

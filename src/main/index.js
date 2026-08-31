@@ -9,7 +9,6 @@
 const { app, BrowserWindow, ipcMain, dialog, session, Menu, net, shell } = require('electron');
 const path = require('path');
 const fs   = require('fs');
-const { pathToFileURL } = require('url');
 const configStore = require('./config-store');
 const { initDatabase, getDb, closeDatabase, backupDatabaseForUpdate } = require('./database');
 const { apiClient } = require('./api-client');
@@ -20,10 +19,12 @@ const { encryptToken, decryptToken } = require('./token-crypto');
 const imageCache = require('./image-cache');
 const { createUpdateService } = require('./update-service');
 const { isMicrosoftStoreDistribution } = require('./distribution');
+const { PrinterService } = require('./printer-service');
 
 let mainWindow = null;
 let syncService = null;
 let updateService = null;
+let printerService = null;
 let isOffline = false;
 let onlineCheckTimer = null;
 let tokenWatcherTimer = null;
@@ -561,20 +562,13 @@ function registerIpcHandlers() {
   });
 
   // ── Printer IPC ──────────────────────────────────────────
-  // Permite al cajero ver/elegir la impresora conectada e imprimir el comprobante fiscal
-  // (PDF generado por el backend en el formato configurado) en silencio a esa impresora.
+  // V2 centraliza configuración local, cola, tickets y PDFs en PrinterService.
+  // Los tres handlers legacy se conservan para frontends empacados con una versión anterior.
 
   ipcMain.handle('printer:list', async (event) => {
     if (!isTrustedSender(event)) return []; // D05
     try {
-      const printers = await event.sender.getPrintersAsync();
-      return printers.map((p) => ({
-        name: p.name,
-        displayName: p.displayName || p.name,
-        description: p.description || '',
-        status: p.status,
-        isDefault: p.isDefault,
-      }));
+      return await printerService.listPrinters(event.sender);
     } catch (err) {
       console.error('[PRINTER] list error:', err.message);
       return [];
@@ -583,78 +577,42 @@ function registerIpcHandlers() {
 
   ipcMain.handle('printer:get-selected', (event) => {
     if (!isTrustedSender(event)) return null; // D05
-    return configStore.get('selectedPrinter') || null;
+    return printerService.getConfig().selectedPrinter;
   });
 
   ipcMain.handle('printer:set-selected', (event, name) => {
     if (!isTrustedSender(event)) return false; // D05
-    configStore.set('selectedPrinter', name || null);
-    return true;
+    try {
+      const current = printerService.getConfig();
+      printerService.saveConfig({ ...current, selectedPrinter: name || null });
+      return true;
+    } catch {
+      return false;
+    }
   });
 
-  // Imprime un PDF (bytes) en silencio. Carga el PDF en una ventana oculta (visor de Chromium) y
-  // lo manda a la impresora indicada en opts.deviceName, o a la seleccionada, o a la por defecto.
+  ipcMain.handle('printer:get-state', async (event) => {
+    if (!isTrustedSender(event)) return { version: 2, readiness: 'UNAUTHORIZED', printers: [] };
+    return printerService.getState(event.sender);
+  });
+
+  ipcMain.handle('printer:save-config', (event, config) => {
+    if (!isTrustedSender(event)) return { success: false, error: 'Origen no autorizado.' };
+    try {
+      return { success: true, config: printerService.saveConfig(config) };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
   ipcMain.handle('printer:print-pdf', async (event, bytes, opts = {}) => {
     if (!isTrustedSender(event)) return { success: false, error: 'Origen no autorizado.' }; // D05
+    return printerService.printPdf(event.sender, bytes, opts);
+  });
 
-    // R4-#64: validar forma/tamaño de `bytes` y el deviceName ANTES de escribir el temp / imprimir.
-    // `bytes` viene del FE remoto vía contextBridge; el gate de origen no valida el CONTENIDO del payload.
-    let buffer;
-    if (bytes instanceof Uint8Array || Buffer.isBuffer(bytes)) buffer = Buffer.from(bytes);
-    else if (bytes instanceof ArrayBuffer) buffer = Buffer.from(new Uint8Array(bytes));
-    else return { success: false, error: 'Formato de PDF inválido.' };
-    if (buffer.length === 0 || buffer.length > 20 * 1024 * 1024) {
-      return { success: false, error: 'PDF vacío o demasiado grande (máx 20MB).' };
-    }
-    if (opts && opts.deviceName != null && (typeof opts.deviceName !== 'string' || opts.deviceName.length > 200)) {
-      return { success: false, error: 'Impresora inválida.' };
-    }
-
-    const deviceName = opts.deviceName || configStore.get('selectedPrinter') || '';
-    let tmpPath = null;
-    let printWin = null;
-    try {
-      tmpPath = path.join(app.getPath('temp'), `nuventa-print-${Date.now()}.pdf`);
-      fs.writeFileSync(tmpPath, buffer);
-
-      printWin = new BrowserWindow({
-        show: false,
-        webPreferences: { plugins: true, contextIsolation: true, nodeIntegration: false },
-      });
-      await printWin.loadURL(pathToFileURL(tmpPath).href);
-
-      const result = await new Promise((resolve) => {
-        // pequeño delay para que el visor de PDF termine de renderizar antes de imprimir
-        setTimeout(() => {
-          if (!printWin || printWin.isDestroyed()) {
-            resolve({ success: false, error: 'Ventana de impresión cerrada' });
-            return;
-          }
-          printWin.webContents.print(
-            {
-              silent: true,
-              printBackground: true,
-              deviceName: deviceName || undefined,
-              margins: { marginType: 'none' },
-            },
-            (success, failureReason) => resolve({ success, error: success ? null : failureReason })
-          );
-        }, 400);
-      });
-
-      return result;
-    } catch (err) {
-      console.error('[PRINTER] print-pdf error:', err.message);
-      return { success: false, error: err.message };
-    } finally {
-      // dar tiempo al spooler a tomar el trabajo antes de destruir la ventana / borrar el temp
-      if (printWin && !printWin.isDestroyed()) {
-        setTimeout(() => { try { printWin.destroy(); } catch {} }, 3000);
-      }
-      if (tmpPath) {
-        setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch {} }, 6000);
-      }
-    }
+  ipcMain.handle('printer:print-ticket', async (event, ticket, opts = {}) => {
+    if (!isTrustedSender(event)) return { success: false, state: 'FAILED', error: 'Origen no autorizado.' };
+    return printerService.printTicket(event.sender, ticket, opts);
   });
 }
 
@@ -910,6 +868,18 @@ app.whenReady().then(async () => {
 
   // 2. Initialize SQLite database
   await initDatabase();
+
+  // 2a. Initialize the Windows-spooler printing service before registering IPC.
+  printerService = new PrinterService({
+    configStore,
+    BrowserWindow,
+    getTempPath: () => app.getPath('temp'),
+    emitStatus: (status) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('printer:job-status', status);
+      }
+    },
+  });
 
   // 2b. Initialize image cache (product images for offline display)
   imageCache.initialize();
