@@ -6,9 +6,9 @@
   "scripts": {
     "start": "electron .",
     "start:dev": "electron . --dev",
-    "test": "node --test test/*.test.js",
+    "test": "node --test",
     "test:smoke": "node test/run-electron-smoke.js",
-    "check": "node --check src/main/api-client.js && node --check src/main/auth-service.js && node --check src/main/index.js && node --check src/main/printer-service.js && node --check src/main/sync-service.js && node --check src/main/update-service.js && node --check src/main/image-cache.js && node --check src/main/local-server.js && node --test test/*.test.js",
+    "check": "node --check src/main/api-client.js && node --check src/main/auth-service.js && node --check src/main/index.js && node --check src/main/printer-service.js && node --check src/main/sync-service.js && node --check src/main/update-service.js && node --check src/main/image-cache.js && node --check src/main/local-server.js && node --test",
     "build:frontend": "node scripts/build-web.js --build-only",
     "build:web": "node scripts/build-web.js",
     "build": "npm run build:web && electron-builder --win",
