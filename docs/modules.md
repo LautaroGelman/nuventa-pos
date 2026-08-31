@@ -64,8 +64,8 @@ en `process.argv`.
   leen del archivo ([config-store.js:68](../src/main/config-store.js#L68)). El resto sale del JSON o
   de `DEFAULTS`.
 - `set(key, value)` / `saveConfig(data)` — persisten en `<userData>/nuventa-pos-config.json`.
-- `DEFAULTS` — `{ windowWidth: 1280, windowHeight: 800 }`. En la práctica solo se persiste el
-  tamaño de la ventana.
+- `DEFAULTS` — `{ windowWidth: 1280, windowHeight: 800 }`. También se persiste `printerConfig`
+  (modo automático, impresora, papel y finalización del asistente) por equipo.
 
 > Por esto, lo que el README viejo decía ("configurar la URL del backend desde el login") ya no
 > aplica: las URLs son fijas por entorno.
@@ -101,10 +101,21 @@ en `process.argv`.
 | `window.nuventaConfig` | `getEnv()` → `{ env, isDev, webAppUrl, backendApiUrl }` |
 | `window.nuventaAuth` | `offlineLogin(email, password)`, `logout()`, `setActiveBranch(id)`, `onLoginStatus(cb)` |
 | `window.nuventaSync` | `forceSync()`, `getStatus()`, `onSyncStatus(cb)`, `onSyncComplete(cb)` |
+| `window.nuventaPrinter` | Bridge v2: `getState`, `saveConfig`, `printPdf`, `printTicket`, `onJobStatus`; conserva adaptadores legacy |
 
 Estos globals son el contrato que el frontend (y la página de fallback) usan para hablar con el
 proceso main. Los handlers IPC del otro lado están en `registerIpcHandlers()`
 ([index.js:315](../src/main/index.js#L315)).
+
+---
+
+## `printer-service.js` — cola de impresión de Windows
+
+[../src/main/printer-service.js](../src/main/printer-service.js) encapsula la configuración local,
+la enumeración de impresoras instaladas, una cola serial de 30 segundos por trabajo y la entrega
+silenciosa al spooler. Valida PDFs y tickets estructurados, deduplica trabajos automáticos y genera
+el HTML del ticket en una ventana aislada con CSP sin red. `SPOOLED` confirma aceptación de
+Windows, no salida física de papel; por eso el servicio no reintenta automáticamente.
 
 ---
 
@@ -131,11 +142,12 @@ el token y navega a la web ([index.js:354](../src/main/index.js#L354)).
 |--------|---------|
 | `index.js` | — (entry point, sin exports). |
 | `local-server.js` | `startLocalServer`, `stopLocalServer`, `getServerPort`, `loginEvents` |
-| `sync-service.js` | `SyncService` |
+| `sync-service.js` | `SyncService`, `delayedInvoiceFromSaleResult` |
 | `auth-service.js` | `authService` (singleton), `AuthService` |
 | `database.js` | `initDatabase`, `getDb`, `closeDatabase` |
 | `api-client.js` | `apiClient` (singleton), `ApiClient` |
 | `config-store.js` | `loadConfig`, `saveConfig`, `getConfig`, `get`, `set`, `DEFAULTS`, `isDev`, `getEnvName`, `getEnvUrls` |
+| `printer-service.js` | `PrinterService` y validadores/render del contrato de impresión |
 | `token-crypto.js` | `encryptToken`, `decryptToken` |
 | `preload/index.js` | — (expone globals vía contextBridge). |
 
