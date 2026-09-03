@@ -84,6 +84,33 @@ async function run() {
     assert.equal(scopedCatalog.status, 200);
     assert.deepEqual((await scopedCatalog.json()).map((product) => product.id), [701]);
 
+    const pagedCatalog = await fetch(`${branchUrl}/items/page?page=0&size=1&q=SALE`);
+    assert.equal(pagedCatalog.status, 200);
+    const pagedCatalogBody = await pagedCatalog.json();
+    assert.equal(pagedCatalogBody.content.length, 1);
+    assert.equal(pagedCatalogBody.content[0].id, 701);
+    assert.equal(pagedCatalogBody.content[0].stockTracked, true);
+    assert.equal(pagedCatalogBody.content[0].sucursalId, 1);
+    assert.equal(pagedCatalogBody.page, 0);
+    assert.equal(pagedCatalogBody.size, 1);
+    assert.equal(pagedCatalogBody.hasNext, false);
+
+    const localBranches = await fetch(
+      `http://127.0.0.1:${localPort}/api/client-panel/1/sucursales`
+    );
+    assert.equal(localBranches.status, 200);
+    assert.deepEqual(await localBranches.json(), [{
+      id: 1,
+      name: 'Sucursal #1',
+      active: true,
+      clientId: 1,
+    }]);
+
+    const crossTenantPage = await fetch(
+      `http://127.0.0.1:${localPort}/api/client-panel/2/sucursales/1/items/page`
+    );
+    assert.equal(crossTenantPage.status, 403);
+
     const salePayloadWithoutRegister = {
       saleDate: '2026-08-09T16:30:00',
       employeeId: 6,

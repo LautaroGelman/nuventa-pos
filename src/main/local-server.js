@@ -300,6 +300,19 @@ function parseRoute(pathname) {
     };
   }
 
+  // Client-scoped routes such as /api/client-panel/:clientId/sucursales and
+  // /api/client-panel/:clientId/inventory/page. Without this branch they were
+  // treated as top-level routes, so cashier requests could neither be served
+  // from SQLite nor safely proxied while online.
+  const clientMatch = path.match(/\/api\/client-panel\/(\d+)\/(.+)/);
+  if (clientMatch) {
+    return {
+      clientId: Number(clientMatch[1]),
+      sucursalId: null,
+      subpath: '/' + clientMatch[2],
+    };
+  }
+
   // Auth and other top-level routes
   return { clientId: null, sucursalId: null, subpath: path };
 }
@@ -849,6 +862,73 @@ handlers['GET /items'] = async (req, res, body, route, query) => {
   return jsonResponse(res, 200, dtos);
 };
 
+handlers['GET /items/page'] = async (req, res, body, route, query) => {
+  const db = getDb();
+  const clientId = Number(getConfigVal(db, 'client_id'));
+  const sucursalId = Number(getConfigVal(db, 'sucursal_id'));
+
+  if (route.clientId !== clientId || route.sucursalId !== sucursalId) {
+    return jsonResponse(res, 403, { error: 'Ruta no permitida desde el POS.' });
+  }
+
+  const requestedPage = Number.parseInt(query.page, 10);
+  const requestedSize = Number.parseInt(query.size, 10);
+  const page = Number.isSafeInteger(requestedPage) && requestedPage >= 0 ? requestedPage : 0;
+  const size = Number.isSafeInteger(requestedSize)
+    ? Math.min(100, Math.max(1, requestedSize))
+    : 50;
+  const q = String(query.q || '').trim();
+  const where = ['active = 1', 'client_id = ?1', 'sucursal_id = ?2'];
+  const params = [clientId, sucursalId];
+
+  if (q) {
+    where.push('(name LIKE ?3 OR code LIKE ?3 OR description LIKE ?3)');
+    params.push(`%${q}%`);
+  }
+
+  const whereSql = where.join(' AND ');
+  const total = Number(db.get(
+    `SELECT COUNT(*) AS total FROM products WHERE ${whereSql}`,
+    params
+  )?.total || 0);
+  const offset = page * size;
+  const products = db.all(`
+    SELECT * FROM products
+     WHERE ${whereSql}
+     ORDER BY CASE WHEN code = ?${params.length + 1} THEN 0 ELSE 1 END, name ASC
+     LIMIT ?${params.length + 2} OFFSET ?${params.length + 3}
+  `, [...params, q, size, offset]);
+
+  return jsonResponse(res, 200, {
+    content: products.map((product) => ({
+      ...productToDto(product),
+      sucursalId,
+      sucursalName: `Sucursal #${sucursalId}`,
+    })),
+    page,
+    size,
+    hasNext: offset + products.length < total,
+  });
+};
+
+// The POS only caches the branch selected at login. Returning that branch
+// locally keeps the inventory selector usable offline without pretending that
+// uncached branches are available.
+handlers['GET /sucursales'] = async (req, res, body, route) => {
+  const db = getDb();
+  const clientId = Number(getConfigVal(db, 'client_id'));
+  const sucursalId = Number(getConfigVal(db, 'sucursal_id'));
+  if (route.clientId !== clientId || !Number.isSafeInteger(sucursalId) || sucursalId <= 0) {
+    return jsonResponse(res, 403, { error: 'Ruta no permitida desde el POS.' });
+  }
+  return jsonResponse(res, 200, [{
+    id: sucursalId,
+    name: `Sucursal #${sucursalId}`,
+    active: true,
+    clientId,
+  }]);
+};
+
 handlers['GET /items/:id'] = async (req, res, body, route, query, pathParams) => {
   const db = getDb();
   const product = db.get(`SELECT * FROM products
@@ -868,6 +948,7 @@ function productToDto(p) {
     name: p.name,
     description: p.description || null,
     quantity: p.quantity || 0,
+    stockTracked: p.stock_tracked == null ? true : !!p.stock_tracked,
     cost: p.cost || 0,
     price: p.price,
     lowStockThreshold: p.low_stock_threshold || null,
@@ -2743,7 +2824,10 @@ function startLocalServer() {
         // Cloud-only routes (dashboard, reports, finance, employees, etc.)
         // Admin/Owner → proxy to cloud
         // Cajero/Inventario → 403 blocked
-        if (route.clientId && isCloudOnlyRoute(subpath)) {
+        const localCashierBranchList = req.method === 'GET'
+          && subpath === '/sucursales'
+          && !isAdminOrOwner();
+        if (route.clientId && isCloudOnlyRoute(subpath) && !localCashierBranchList) {
           if (isAdminOrOwner()) {
             const fullUrl = req.url; // preserve original URL with query params
             return await proxyToCloud(req, res, req.method, fullUrl, body);
@@ -2754,7 +2838,8 @@ function startLocalServer() {
         }
 
         // ── Multi-branch inventory search (always cloud, any role) ──
-        if (subpath === '/inventory/all-branches' || subpath === '/products/all-branches') {
+        if (subpath === '/inventory/all-branches' || subpath === '/products/all-branches'
+            || subpath === '/inventory/page') {
           const fullUrl = req.url;
           return await proxyToCloud(req, res, req.method, fullUrl, body);
         }
