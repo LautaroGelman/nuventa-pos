@@ -9,6 +9,7 @@ const STORE_PRODUCT_ID = '9MWQ82CX7C5B';
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const STARTUP_CHECK_DELAY_MS = 30_000;
 const MIN_CHECK_GAP_MS = 5 * 60 * 1000;
+const UPDATER_CACHE_DIR_NAME = 'nuventa-pos-updater';
 const PUBLIC_STATES = new Set([
   'idle', 'checking', 'downloading', 'ready', 'installing',
   'recoverable-error', 'blocked', 'disabled', 'managed-by-store',
@@ -30,6 +31,37 @@ function normalizeFeedUrl(value) {
         || url.username || url.password || url.search || url.hash) return DEFAULT_FEED_URL;
     return `${url.origin}${allowedPath}`;
   } catch { return DEFAULT_FEED_URL; }
+}
+
+function stableVersionParts(value) {
+  const match = String(value || '').match(/^(\d+)\.(\d+)\.(\d+)$/);
+  return match ? match.slice(1).map(Number) : null;
+}
+
+function cleanupStalePendingUpdate(baseCachePath, currentVersion,
+  cacheDirName = UPDATER_CACHE_DIR_NAME) {
+  const current = stableVersionParts(currentVersion);
+  if (!baseCachePath || !current || !/^[a-z0-9._-]+$/i.test(cacheDirName)) return false;
+  const pendingDirectory = path.resolve(baseCachePath, cacheDirName, 'pending');
+  const infoPath = path.join(pendingDirectory, 'update-info.json');
+  let info;
+  try { info = JSON.parse(fs.readFileSync(infoPath, 'utf8')); } catch { return false; }
+  const fileName = typeof info.fileName === 'string' ? info.fileName : '';
+  if (!fileName || path.basename(fileName) !== fileName) return false;
+  const versionMatch = fileName.match(/-(\d+\.\d+\.\d+)\.exe$/i);
+  const pending = stableVersionParts(versionMatch?.[1]);
+  if (!pending) return false;
+  const isNewer = pending.some((part, index) => part !== current[index]
+    && pending.slice(0, index).every((previous, i) => previous === current[i])
+    && part > current[index]);
+  if (isNewer) return false;
+  for (const candidate of [path.join(pendingDirectory, fileName),
+    path.join(pendingDirectory, 'current.blockmap'), infoPath]) {
+    try { fs.unlinkSync(candidate); } catch (error) {
+      if (error?.code !== 'ENOENT') return false;
+    }
+  }
+  return true;
 }
 
 class UpdateService extends EventEmitter {
@@ -69,6 +101,10 @@ class UpdateService extends EventEmitter {
     }
     if (this._started) return;
     this._started = true;
+    if (cleanupStalePendingUpdate(this.autoUpdater?.app?.baseCachePath,
+      this.app.getVersion())) {
+      console.log('[UPDATER] Removed a pending package older than the installed version.');
+    }
     this.autoUpdater.autoDownload = true;
     this.autoUpdater.autoInstallOnAppQuit = false;
     this.autoUpdater.allowPrerelease = false;
@@ -221,5 +257,6 @@ function createUpdateService(options = {}) {
 
 module.exports = {
   CHECK_INTERVAL_MS, DEFAULT_FEED_URL, MIN_CHECK_GAP_MS, STARTUP_CHECK_DELAY_MS,
-  STORE_PRODUCT_ID, UpdateService, createUpdateService, normalizeFeedUrl, safeError,
+  STORE_PRODUCT_ID, UpdateService, cleanupStalePendingUpdate, createUpdateService,
+  normalizeFeedUrl, safeError,
 };

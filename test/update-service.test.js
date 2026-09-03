@@ -3,7 +3,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const EventEmitter = require('events');
-const { UpdateService, MIN_CHECK_GAP_MS, normalizeFeedUrl } = require('../src/main/update-service');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const {
+  UpdateService, MIN_CHECK_GAP_MS, cleanupStalePendingUpdate, normalizeFeedUrl,
+} = require('../src/main/update-service');
 
 class FakeUpdater extends EventEmitter {
   constructor() {
@@ -113,4 +118,27 @@ test('pospone la instalación si el respaldo falla', async () => {
   assert.deepEqual(updater.installCalls, []);
   assert.match(service.getStatus().error, /disco lleno/);
   service.stop();
+});
+
+test('elimina sólo un paquete pendiente igual o anterior a la versión instalada', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nuventa-updater-cache-'));
+  const pending = path.join(root, 'nuventa-pos-updater', 'pending');
+  fs.mkdirSync(pending, { recursive: true });
+  fs.writeFileSync(path.join(pending, 'Nuventa-POS-Setup-1.0.9.exe'), 'old');
+  fs.writeFileSync(path.join(pending, 'current.blockmap'), 'old-map');
+  fs.writeFileSync(path.join(pending, 'update-info.json'), JSON.stringify({
+    fileName: 'Nuventa-POS-Setup-1.0.9.exe', sha512: 'test',
+  }));
+
+  assert.equal(cleanupStalePendingUpdate(root, '1.1.0'), true);
+  assert.equal(fs.existsSync(path.join(pending, 'update-info.json')), false);
+  assert.equal(fs.existsSync(path.join(pending, 'Nuventa-POS-Setup-1.0.9.exe')), false);
+
+  fs.writeFileSync(path.join(pending, 'Nuventa-POS-Setup-1.2.0.exe'), 'future');
+  fs.writeFileSync(path.join(pending, 'update-info.json'), JSON.stringify({
+    fileName: 'Nuventa-POS-Setup-1.2.0.exe', sha512: 'test',
+  }));
+  assert.equal(cleanupStalePendingUpdate(root, '1.1.0'), false);
+  assert.equal(fs.existsSync(path.join(pending, 'Nuventa-POS-Setup-1.2.0.exe')), true);
+  fs.rmSync(root, { recursive: true, force: true });
 });
