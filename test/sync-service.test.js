@@ -2,9 +2,15 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { SyncService, delayedInvoiceFromSaleResult } = require('../src/main/sync-service');
+const {
+  SyncService,
+  delayedInvoiceFromSaleResult,
+  supportsBundleV2,
+  acknowledgeLegacyOutbox,
+  quarantineLegacyOutbox,
+} = require('../src/main/sync-service');
 
-test('al cerrar espera el ciclo en vuelo y luego ejecuta una sincronización final', async () => {
+test('al cerrar sólo espera el ciclo en vuelo y no inicia red nueva', async () => {
   const service = new SyncService();
   const events = [];
   service._running = true;
@@ -23,7 +29,7 @@ test('al cerrar espera el ciclo en vuelo y luego ejecuta una sincronización fin
 
   await service.syncBeforeShutdown();
 
-  assert.deepEqual(events, ['stop', 'in-flight-finished', 'final-sync', 'stop']);
+  assert.deepEqual(events, ['stop', 'in-flight-finished']);
 });
 
 test('una factura autorizada al sincronizar se expone para notificación manual', () => {
@@ -39,4 +45,33 @@ test('una factura autorizada al sincronizar se expone para notificación manual'
     id: 92,
     invoice: { emitida: false, invoiceId: 45 },
   }, { emitInvoice: true }), null);
+});
+
+test('negocia bundle v2 solo cuando el contrato y la capacidad estan publicados', () => {
+  assert.equal(supportsBundleV2({ currentContractVersion: 1 }), false);
+  assert.equal(supportsBundleV2({ currentContractVersion: 2, features: { bundleSyncV2: true } }), true);
+  assert.equal(supportsBundleV2({ currentContractVersion: 2, features: ['bundleSyncV2'] }), true);
+  assert.equal(supportsBundleV2({ currentContractVersion: 2, features: {} }), false);
+});
+
+test('el ACK v1 consume solo el evento equivalente del outbox v2', () => {
+  const calls = [];
+  const db = { run: (sql, params) => calls.push({ sql, params }) };
+
+  acknowledgeLegacyOutbox(db, 'SALE', 'sales', 41);
+  acknowledgeLegacyOutbox(db, ['CASH_SESSION_OPEN', 'CASH_SESSION_CLOSE'], 'cash_sessions', 9);
+
+  assert.equal(calls.length, 2);
+  assert.match(calls[0].sql, /DELETE FROM sync_outbox/);
+  assert.deepEqual(calls[0].params, ['sales', 41, 'SALE']);
+  assert.deepEqual(calls[1].params, ['cash_sessions', 9, 'CASH_SESSION_OPEN', 'CASH_SESSION_CLOSE']);
+});
+
+test('un rechazo permanente v1 pone su outbox en cuarentena', () => {
+  const calls = [];
+  quarantineLegacyOutbox({ run: (sql, params) => calls.push({ sql, params }) }, 'returns', 7, 'HTTP 422');
+
+  assert.equal(calls.length, 1);
+  assert.match(calls[0].sql, /state = 'QUARANTINED'/);
+  assert.deepEqual(calls[0].params, ['HTTP 422', 'returns', 7]);
 });

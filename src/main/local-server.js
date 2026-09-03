@@ -824,6 +824,8 @@ handlers['POST /api/auth/logout'] = async (req, res) => {
 
 handlers['GET /items'] = async (req, res, body, route, query) => {
   const db = getDb();
+  const clientId = Number(getConfigVal(db, 'client_id'));
+  const sucursalId = Number(getConfigVal(db, 'sucursal_id'));
   const q = query.q || '';
   let products;
 
@@ -831,12 +833,15 @@ handlers['GET /items'] = async (req, res, body, route, query) => {
     const term = `%${q}%`;
     products = db.all(`
       SELECT * FROM products
-      WHERE active = 1 AND (name LIKE ?1 OR code LIKE ?1 OR description LIKE ?1)
-      ORDER BY CASE WHEN code = ?2 THEN 0 ELSE 1 END, name ASC
+      WHERE active = 1 AND client_id = ?1 AND sucursal_id = ?2
+        AND (name LIKE ?3 OR code LIKE ?3 OR description LIKE ?3)
+      ORDER BY CASE WHEN code = ?4 THEN 0 ELSE 1 END, name ASC
       LIMIT 100
-    `, [term, q]);
+    `, [clientId, sucursalId, term, q]);
   } else {
-    products = db.all('SELECT * FROM products WHERE active = 1 ORDER BY name ASC');
+    products = db.all(`SELECT * FROM products
+      WHERE active = 1 AND client_id = ? AND sucursal_id = ? ORDER BY name ASC`,
+    [clientId, sucursalId]);
   }
 
   // Convert to ProductDto format the web frontend expects
@@ -846,7 +851,12 @@ handlers['GET /items'] = async (req, res, body, route, query) => {
 
 handlers['GET /items/:id'] = async (req, res, body, route, query, pathParams) => {
   const db = getDb();
-  const product = db.get('SELECT * FROM products WHERE id = ? AND active = 1', [pathParams.id]);
+  const product = db.get(`SELECT * FROM products
+    WHERE id = ? AND active = 1 AND client_id = ? AND sucursal_id = ?`, [
+    pathParams.id,
+    Number(getConfigVal(db, 'client_id')),
+    Number(getConfigVal(db, 'sucursal_id')),
+  ]);
   if (!product) return jsonResponse(res, 404, { error: 'Product not found' });
   return jsonResponse(res, 200, productToDto(product));
 };
@@ -1009,13 +1019,30 @@ handlers['POST /sales'] = async (req, res, body) => {
   // SalesService (clientSaleUuid + unitPrice != null && > 0): si el precio cambió en la nube entre el
   // cacheo del catálogo y el sync, un CAJERO se comería un 403 "no coincide con el de catálogo" y la
   // venta caería en needs_review. Con la separación, el payload de sync queda idéntico al de hoy.
+  const catalogClientId = Number(getConfigVal(db, 'client_id'));
+  const catalogSucursalId = Number(getConfigVal(db, 'sucursal_id'));
+  const requestedProductIds = [...new Set(items
+    .map((item) => item.productId == null ? null : Number(item.productId))
+    .filter((id) => Number.isSafeInteger(id) && id > 0))];
+  const productRows = requestedProductIds.length
+    ? db.all(`SELECT id, name, code, price, stock_tracked, catalog_revision, price_proof
+                FROM products WHERE client_id = ? AND sucursal_id = ? AND active = 1
+                 AND id IN (${requestedProductIds.map(() => '?').join(',')})`,
+    [catalogClientId, catalogSucursalId, ...requestedProductIds])
+    : [];
+  const productsById = new Map(productRows.map((product) => [Number(product.id), product]));
+  const missingProduct = requestedProductIds.find((id) => !productsById.has(id));
+  if (missingProduct != null) {
+    return jsonResponse(res, 409, {
+      error: `El producto ${missingProduct} no pertenece al catálogo activo de esta sucursal. Sincronizá antes de vender.`,
+    });
+  }
+
   const resolvedItems = items.map((item) => {
     // R4-#8: los ítems INDEPENDIENTES (productId null) no están en el catálogo; traen customName y
     // unitPrice propios. El nombre se persiste en product_name — si no, el backend lo exige no-blank
     // al sincronizar y la venta independiente offline quedaba atrapada en needs_review.
-    const prod = item.productId != null
-      ? db.get('SELECT name, code, price FROM products WHERE id = ?', [item.productId])
-      : null;
+    const prod = item.productId != null ? productsById.get(Number(item.productId)) : null;
     const clientUnitPrice = item.unitPrice != null ? Number(item.unitPrice) : null;
     return {
       ...item,
@@ -1023,6 +1050,9 @@ handlers['POST /sales'] = async (req, res, body) => {
         ? prod.name
         : (item.customName && String(item.customName).trim() ? String(item.customName).trim() : 'Producto'),
       productCode: prod ? prod.code : null,
+      stockTracked: prod ? Number(prod.stock_tracked) !== 0 : false,
+      catalogRevision: prod ? Number(prod.catalog_revision || 0) : null,
+      priceProof: prod ? prod.price_proof : null,
       clientUnitPrice,
       unitPrice: clientUnitPrice != null
         ? clientUnitPrice
@@ -1086,20 +1116,22 @@ handlers['POST /sales'] = async (req, res, body) => {
   for (const item of resolvedItems) {
     db.run(`
       INSERT INTO sale_items (sale_local_id, product_id, product_name, product_code, quantity,
-        unit_price, client_unit_price)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+        unit_price, client_unit_price, catalog_revision, price_proof)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       localId, item.productId,
       item.productName,
       item.productCode,
       item.quantity, item.unitPrice, item.clientUnitPrice,
+      item.catalogRevision, item.priceProof,
     ]);
 
     // Decrement local stock. Los PESABLES quedan afuera igual que los no_code: se venden por kilo
     // y `quantity` es entero, así que el backend tampoco se los descuenta. Si no se excluyeran acá,
     // el stock local divergiría del de la nube en cada venta pesada.
     db.run(
-      'UPDATE products SET quantity = MAX(0, quantity - ?) WHERE id = ? AND no_code = 0 AND weighable = 0',
+      `UPDATE products SET quantity = quantity - ?
+        WHERE id = ? AND stock_tracked = 1 AND weighable = 0`,
       [item.quantity, item.productId]
     );
   }
@@ -1714,35 +1746,35 @@ handlers['POST /cash-sessions/open'] = async (req, res, body) => {
       error: `La caja seleccionada ya está ocupada localmente${occupant.employee_name ? ` por ${occupant.employee_name}` : ''}. Conectate para verificar su estado antes de abrirla.`,
     });
   }
-  if (cloudSession) {
-    for (const occupant of localRegisterOccupants) {
-      reconcileStaleRegisterOccupant(db, occupant);
-    }
-  }
-
   const amount = cloudSession?.initialAmount
     ?? requestedAmount
     ?? register.default_opening_float
     ?? 0;
 
-  const result = db.run(`
-    INSERT INTO cash_sessions (cloud_id, client_session_uuid, client_id, sucursal_id, employee_id, employee_name,
-      status, business_date, opening_time, initial_amount, expected_amount,
-      cash_register_id, cash_register_name, cash_register_code, sync_status)
-    VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, 'pending')
-  `, [
-    cloudSession?.id || null,
-    clientSessionUuid,
-    Number(getConfigVal(db, 'client_id')),
-    Number(getConfigVal(db, 'sucursal_id')),
-    employeeId, employeeName,
-    today, now, Number(amount), Number(amount),
-    cashRegisterId || null,
-    register?.name || null,
-    register?.code || null,
-  ]);
-
-  db.save();
+  const result = db.transaction(() => {
+    if (cloudSession) {
+      for (const occupant of localRegisterOccupants) {
+        reconcileStaleRegisterOccupant(db, occupant);
+      }
+    }
+    return db.run(`
+      INSERT INTO cash_sessions (cloud_id, client_session_uuid, client_id, sucursal_id, employee_id, employee_name,
+        status, business_date, opening_time, initial_amount, expected_amount,
+        cash_register_id, cash_register_name, cash_register_code, sync_status)
+      VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      cloudSession?.id || null,
+      clientSessionUuid,
+      Number(getConfigVal(db, 'client_id')),
+      Number(getConfigVal(db, 'sucursal_id')),
+      employeeId, employeeName,
+      today, now, Number(amount), Number(amount),
+      cashRegisterId || null,
+      register?.name || null,
+      register?.code || null,
+      cloudSession ? 'synced' : 'pending',
+    ]);
+  });
 
   return jsonResponse(res, 200, {
     id: result.lastId,
@@ -1805,15 +1837,13 @@ handlers['POST /cash-sessions/close'] = async (req, res, body, route, query, pat
   const expectedInCash = computeExpectedInCash(db, session);
   const diff = counted - expectedInCash;
 
-  db.run(`
-    UPDATE cash_sessions SET
-      status = 'CLOSED', closing_time = ?, counted_amount = ?,
-      expected_amount = ?, difference = ?, closing_note = ?, float_left_for_next = ?,
-      sync_status = 'pending'
-    WHERE id = ?
-  `, [now, counted, expectedInCash, diff, note || null, floatLeftForNext || null, session.id]);
-
-  db.save();
+  db.transaction(() => db.run(`
+      UPDATE cash_sessions SET
+        status = 'CLOSED', closing_time = ?, counted_amount = ?,
+        expected_amount = ?, difference = ?, closing_note = ?, float_left_for_next = ?,
+        sync_status = 'pending'
+      WHERE id = ?
+    `, [now, counted, expectedInCash, diff, note || null, floatLeftForNext || null, session.id]));
 
   return jsonResponse(res, 200, {
     ...sessionToDto(session),
@@ -2368,35 +2398,36 @@ handlers['POST /expenses'] = async (req, res, body) => {
   // Clave de idempotencia (C01/C04): se persiste y el sync la reenvía en cada reintento.
   const clientMovementUuid = crypto.randomUUID();
 
-  const result = db.run(`
-    INSERT INTO cash_movements (client_movement_uuid, type, scope, amount, description,
-      expense_category_id, employee_id, employee_name, cash_session_id, movement_date, client_id, sucursal_id, sync_status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-  `, [
-    clientMovementUuid,
-    type, scope, Number(amount), movementNote,
-    categoryId,
-    employeeId, employeeName,
-    currentSession ? currentSession.id : null, now,
-    Number(getConfigVal(db, 'client_id')) || null, Number(getConfigVal(db, 'sucursal_id')) || null, // R4-#40
-  ]);
+  const result = db.transaction(() => {
+    const inserted = db.run(`
+      INSERT INTO cash_movements (client_movement_uuid, type, scope, amount, description,
+        expense_category_id, employee_id, employee_name, cash_session_id, movement_date, client_id, sucursal_id, sync_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    `, [
+      clientMovementUuid,
+      type, scope, Number(amount), movementNote,
+      categoryId,
+      employeeId, employeeName,
+      currentSession ? currentSession.id : null, now,
+      Number(getConfigVal(db, 'client_id')) || null, Number(getConfigVal(db, 'sucursal_id')) || null, // R4-#40
+    ]);
 
-  // Update cash session expected amount
-  if (currentSession && scope === 'SESSION') {
-    if (type === 'INJECTION') {
-      db.run(
-        'UPDATE cash_sessions SET expected_amount = expected_amount + ? WHERE id = ?',
-        [Number(amount), currentSession.id]
-      );
-    } else if (type === 'WITHDRAWAL' || type === 'EXPENSE') {
-      db.run(
-        'UPDATE cash_sessions SET expected_amount = expected_amount - ? WHERE id = ?',
-        [Number(amount), currentSession.id]
-      );
+    // The movement, its outbox trigger and the expected cash adjustment form one durable unit.
+    if (currentSession && scope === 'SESSION') {
+      if (type === 'INJECTION') {
+        db.run(
+          'UPDATE cash_sessions SET expected_amount = expected_amount + ? WHERE id = ?',
+          [Number(amount), currentSession.id]
+        );
+      } else if (type === 'WITHDRAWAL' || type === 'EXPENSE') {
+        db.run(
+          'UPDATE cash_sessions SET expected_amount = expected_amount - ? WHERE id = ?',
+          [Number(amount), currentSession.id]
+        );
+      }
     }
-  }
-
-  db.save();
+    return inserted;
+  });
 
   return jsonResponse(res, 201, {
     id: result.lastId,
@@ -2741,6 +2772,9 @@ function startLocalServer() {
 
         if (match) {
           await match.handler(req, res, body, route, query, match.params);
+          if (isMutation && !subpath.startsWith('/auth/')) {
+            loginEvents.emit('local-mutation', { method: req.method, path: subpath });
+          }
         } else if (isAdminOrOwner()) {
           // R4-#34: el fallback proxea rutas no manejadas a la nube con el token del dueño (confused
           // deputy). Acotamos con un denylist: el POS NUNCA debe alcanzar el super-admin/admin global de

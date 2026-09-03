@@ -73,11 +73,18 @@ contextBridge.exposeInMainWorld('nuventaSync', {
 contextBridge.exposeInMainWorld('nuventaUpdater', {
   getStatus: () => ipcRenderer.invoke('updater:status'),
   check: () => ipcRenderer.invoke('updater:check'),
+  retry: () => ipcRenderer.invoke('updater:retry'),
+  install: () => ipcRenderer.invoke('updater:install'),
+  openStore: () => ipcRenderer.invoke('updater:open-store'),
   onStatus: (callback) => {
     const handler = (_event, data) => callback(data);
     ipcRenderer.on('updater:status', handler);
     return () => ipcRenderer.removeListener('updater:status', handler);
   },
+});
+
+contextBridge.exposeInMainWorld('nuventaDiagnostics', {
+  export: () => ipcRenderer.invoke('diagnostics:export'),
 });
 
 // ── Impresora térmica / fiscal ──────────────────────────────

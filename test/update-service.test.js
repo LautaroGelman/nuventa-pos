@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const EventEmitter = require('events');
-const { UpdateService, MIN_CHECK_GAP_MS } = require('../src/main/update-service');
+const { UpdateService, MIN_CHECK_GAP_MS, normalizeFeedUrl } = require('../src/main/update-service');
 
 class FakeUpdater extends EventEmitter {
   constructor() {
@@ -37,6 +37,15 @@ test('no consulta el feed en desarrollo', async () => {
   assert.equal(updater.checks, 0);
 });
 
+test('acepta solo los feeds direct y pilot del dominio de descargas', () => {
+  assert.equal(normalizeFeedUrl('https://descargas.nuventa.com.ar/pilot/'),
+    'https://descargas.nuventa.com.ar/pilot');
+  assert.equal(normalizeFeedUrl('https://evil.example/direct'),
+    'https://descargas.nuventa.com.ar/direct');
+  assert.equal(normalizeFeedUrl('https://descargas.nuventa.com.ar/pilot?token=secret'),
+    'https://descargas.nuventa.com.ar/direct');
+});
+
 test('serializa y limita las consultas al feed', async () => {
   const { service, updater, advance } = createService();
   service.start();
@@ -49,38 +58,23 @@ test('serializa y limita las consultas al feed', async () => {
   service.stop();
 });
 
-test('al cerrar espera que termine una actualización descubierta en el chequeo final', async () => {
+test('el cierre nunca consulta el feed ni espera una descarga', async () => {
   const { service, updater } = createService();
   service.start();
-  updater.checkForUpdates = async () => {
-    updater.checks += 1;
-    updater.emit('checking-for-update');
-    updater.emit('update-available', { version: '1.0.2' });
-    setTimeout(() => updater.emit('update-downloaded', { version: '1.0.2' }), 15);
-  };
+  const status = await service.checkForUpdatesBeforeShutdown();
 
-  const status = await service.checkForUpdatesBeforeShutdown({ timeoutMs: 200 });
-
-  assert.equal(updater.checks, 1);
-  assert.equal(status.state, 'ready');
-  assert.equal(status.availableVersion, '1.0.2');
+  assert.equal(updater.checks, 0);
+  assert.equal(status.state, 'idle');
   service.stop();
 });
 
-test('el chequeo final no bloquea indefinidamente si la descarga no termina', async () => {
+test('Store administra las actualizaciones sin configurar ni consultar R2', async () => {
   const { service, updater } = createService();
-  service.start();
-  updater.checkForUpdates = async () => {
-    updater.checks += 1;
-    updater.emit('checking-for-update');
-    updater.emit('update-available', { version: '1.0.2' });
-  };
-
-  const status = await service.checkForUpdatesBeforeShutdown({ timeoutMs: 10 });
-
-  assert.equal(status.state, 'downloading');
-  assert.equal(status.shutdownWaitTimedOut, true);
-  assert.equal(service.listenerCount('status'), 0);
+  service.start({ managedByStore: true });
+  await service.checkForUpdates({ force: true });
+  assert.equal(service.getStatus().state, 'managed-by-store');
+  assert.equal(updater.feed, undefined);
+  assert.equal(updater.checks, 0);
   service.stop();
 });
 

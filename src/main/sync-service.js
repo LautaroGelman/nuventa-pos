@@ -6,12 +6,16 @@ const EventEmitter = require('events');
 const { getDb } = require('./database');
 const { apiClient } = require('./api-client');
 const imageCache = require('./image-cache');
+const { BundleSyncV2 } = require('./sync-bundle-v2');
 
 // Full cloud↔local reconciliation every hour.
 // If a sync fails (offline), a 5-minute retry fires until the
 // connection is restored, then normal hourly cadence resumes.
-const SYNC_INTERVAL_MS  = 3_600_000;   // 1 hour
-const RETRY_INTERVAL_MS =   300_000;   // 5 minutes (when offline)
+const SYNC_INTERVAL_MS = 300_000; // conditional pull every 5 minutes
+const RETRY_MIN_MS = 15_000;
+const RETRY_MAX_MS = 300_000;
+const MUTATION_DEBOUNCE_MS = 5_000;
+const V2_REPROBE_MS = 15 * 60 * 1000;
 const BATCH_SIZE = 20;
 
 // Tras este nº de reintentos transitorios, una fila se escala a 'needs_review' (dead-letter, C15)
@@ -48,6 +52,33 @@ function delayedInvoiceFromSaleResult(result, requestedInvoice) {
   };
 }
 
+function supportsBundleV2(compatibility) {
+  const features = compatibility?.features;
+  return Number(compatibility?.currentContractVersion) >= 2
+    && !!(features?.bundleSyncV2 === true || features?.includes?.('bundleSyncV2'));
+}
+
+// Contract v1 uses the legacy endpoints, but every durable local mutation also
+// has a v2 outbox entry. Consume both atomically after the cloud acknowledges it
+// so enabling v2 later cannot replay an operation already accepted through v1.
+function acknowledgeLegacyOutbox(db, mutationTypes, sourceTable, sourceId) {
+  const types = Array.isArray(mutationTypes) ? mutationTypes : [mutationTypes];
+  if (types.length === 0) return;
+  const placeholders = types.map(() => '?').join(',');
+  db.run(`DELETE FROM sync_outbox
+           WHERE source_table = ? AND source_id = ?
+             AND mutation_type IN (${placeholders})`,
+    [sourceTable, sourceId, ...types]);
+}
+
+function quarantineLegacyOutbox(db, sourceTable, sourceId, error) {
+  db.run(`UPDATE sync_outbox
+             SET state = 'QUARANTINED', last_error = ?, updated_at = datetime('now')
+           WHERE source_table = ? AND source_id = ?
+             AND state IN ('PENDING','IN_FLIGHT')`,
+    [error || 'La operación requiere revisión manual', sourceTable, sourceId]);
+}
+
 class SyncService extends EventEmitter {
   constructor() {
     super();
@@ -57,11 +88,16 @@ class SyncService extends EventEmitter {
     this._runAgain   = false;  // branch/login changes can request one follow-up cycle
     this._lastOnline = null;   // last observed connectivity (real, not derived from _running)
     this._delayedInvoices = []; // facturas emitidas al subir ventas offline; solo se notifican
+    this._mutationTimer = null;
+    this._retryAttempt = 0;
+    this._bundleV2Available = null;
+    this._lastV2ProbeAt = 0;
+    this._bundle = new BundleSyncV2(apiClient);
   }
 
   start() {
     if (this._timer) return;
-    console.log('[SYNC] Service started — hourly sync, 5-min retry on offline');
+    console.log('[SYNC] Service started — bundle v2 pull every 5 minutes');
     this._timer = setInterval(() => this._tick(), SYNC_INTERVAL_MS);
     // First run a few seconds after startup
     setTimeout(() => this._tick(), 3000);
@@ -70,6 +106,7 @@ class SyncService extends EventEmitter {
   stop() {
     if (this._timer)      { clearInterval(this._timer);      this._timer      = null; }
     if (this._retryTimer) { clearTimeout(this._retryTimer);  this._retryTimer = null; }
+    if (this._mutationTimer) { clearTimeout(this._mutationTimer); this._mutationTimer = null; }
     this._runAgain = false;
     console.log('[SYNC] Service stopped');
   }
@@ -85,14 +122,17 @@ class SyncService extends EventEmitter {
     return !this._running;
   }
 
-  // ── Schedule a 5-minute retry (replaces any existing one) ──
+  // Exponential retry with jitter: 15 seconds up to 5 minutes.
   _scheduleRetry() {
     if (this._retryTimer) return; // already waiting
-    console.log('[SYNC] Offline — will retry in 5 minutes');
+    const base = Math.min(RETRY_MAX_MS, RETRY_MIN_MS * (2 ** Math.min(this._retryAttempt, 5)));
+    const delay = Math.min(RETRY_MAX_MS, Math.round(base * (0.75 + Math.random() * 0.5)));
+    this._retryAttempt++;
+    console.log(`[SYNC] Retry scheduled in ${Math.round(delay / 1000)} seconds`);
     this._retryTimer = setTimeout(() => {
       this._retryTimer = null;
       this._tick();
-    }, RETRY_INTERVAL_MS);
+    }, delay);
   }
 
   // ── Cancel any pending retry (called after a successful sync) ──
@@ -101,6 +141,14 @@ class SyncService extends EventEmitter {
       clearTimeout(this._retryTimer);
       this._retryTimer = null;
     }
+  }
+
+  notifyLocalMutation() {
+    if (this._mutationTimer) clearTimeout(this._mutationTimer);
+    this._mutationTimer = setTimeout(() => {
+      this._mutationTimer = null;
+      this.forceSync();
+    }, MUTATION_DEBOUNCE_MS);
   }
 
   async _tick() {
@@ -150,6 +198,49 @@ class SyncService extends EventEmitter {
         db.save();
       }
 
+      // Negotiate before touching v2. Some legacy stacks map an unknown controller route to a
+      // generic 500 instead of 404; the compatibility document is the reliable rollout gate.
+      // Re-probing lets a running POS adopt v2 after the backend is deployed, without a restart.
+      if (this._bundleV2Available !== true
+          && Date.now() - this._lastV2ProbeAt >= V2_REPROBE_MS) {
+        this._lastV2ProbeAt = Date.now();
+        try {
+          this._bundleV2Available = supportsBundleV2(await apiClient.getPosCompatibility());
+        } catch (error) {
+          console.warn('[SYNC] Could not negotiate bundle v2:', error.message);
+        }
+      }
+
+      // v2 is the normal path. An advertised v1 contract or a genuine 404/405 activates the
+      // temporary fallback. Auth, validation and network errors leave the durable outbox queued.
+      if (this._bundleV2Available !== false) {
+        try {
+          this._delayedInvoices = [];
+          const bundle = await this._bundle.sync();
+          this._bundleV2Available = true;
+          this._retryAttempt = 0;
+          this._delayedInvoices = bundle.delayedInvoices;
+          if (bundle.changeCount > 0) this.emit('products-updated');
+          if (bundle.mutationCount > 0) {
+            this.emit('sync-complete', {
+              total: bundle.mutationCount,
+              changes: bundle.changeCount,
+              delayedInvoices: bundle.delayedInvoices,
+              protocolVersion: 2,
+            });
+          }
+          this.emit('sync-status', { online: true, syncing: false, protocolVersion: 2 });
+          return;
+        } catch (error) {
+          if (error.status === 404 || error.status === 405) {
+            this._bundleV2Available = false;
+            console.warn('[SYNC] Backend without bundle v2; temporary v1 fallback enabled.');
+          } else {
+            throw error;
+          }
+        }
+      }
+
       // 1. Upload pending sales (local → cloud)
       this._delayedInvoices = [];
       const salesSynced = await this._uploadPendingSales();
@@ -187,6 +278,7 @@ class SyncService extends EventEmitter {
       }
 
       this.emit('sync-status', { online: true, syncing: false });
+      this._retryAttempt = 0;
     } catch (err) {
       console.error('[SYNC] Tick error:', err.message);
       this.emit('sync-status', { online: false, syncing: false });
@@ -214,26 +306,27 @@ class SyncService extends EventEmitter {
   }
 
   /**
-   * Apagado seguro: cancela los timers, deja terminar cualquier ciclo que ya estaba en vuelo y
-   * ejecuta un ciclo final completo antes de que el proceso principal borre el token o cierre SQLite.
+   * Apagado seguro: nunca inicia red nueva; sólo deja finalizar hasta 3 s una petición ya en curso.
    */
   async syncBeforeShutdown() {
     this.stop();
-    while (this._running) {
-      await new Promise((resolve) => setTimeout(resolve, 100));
-    }
-    await this._tick();
-    // Un intento offline agenda un retry; al cerrar no debe mantener vivo el proceso.
-    this.stop();
+    return this.drain(3000);
   }
 
   getStatus() {
     const db = getDb();
+    const outbox = db.get(`SELECT COUNT(*) cnt, MIN(created_at) oldest,
+      COALESCE(SUM(LENGTH(payload_json)),0) bytes,
+      CAST(COALESCE((julianday('now')-julianday(MIN(created_at)))*86400,0) AS INTEGER) oldest_age_seconds
+      FROM sync_outbox WHERE state IN ('PENDING','IN_FLIGHT')`);
+    const quarantined = db.get("SELECT COUNT(*) cnt FROM sync_outbox WHERE state='QUARANTINED'");
     const pendingSales = db.get("SELECT COUNT(*) as cnt FROM sales WHERE sync_status = 'pending'");
     const pendingReturns = db.get("SELECT COUNT(*) as cnt FROM returns WHERE sync_status = 'pending'");
     const pendingMovements = db.get("SELECT COUNT(*) as cnt FROM cash_movements WHERE sync_status = 'pending'");
     const pendingSessions = db.get("SELECT COUNT(*) as cnt FROM cash_sessions WHERE sync_status = 'pending' AND status = 'CLOSED'");
     const lastSync = db.get("SELECT value FROM app_config WHERE key = 'last_product_sync'");
+    const syncState = db.get('SELECT cursor FROM sync_state WHERE client_id=? AND sucursal_id=?',
+      [Number(apiClient.clientId || 0), Number(apiClient.sucursalId || 0)]);
 
     // C02/C15: filas que el sync NO pudo subir (4xx o dead-letter). Visibles para revisión manual;
     // nunca se cuentan como 'synced'.
@@ -258,6 +351,13 @@ class SyncService extends EventEmitter {
       needsReviewMovements: reviewMovements?.cnt || 0,
       needsReviewSessions: reviewSessions?.cnt || 0,
       lastSyncAt: lastSync?.value || null,
+      outboxPending: outbox?.cnt || 0,
+      outboxOldestAt: outbox?.oldest || null,
+      outboxOldestAgeSeconds: outbox?.oldest_age_seconds || 0,
+      outboxPayloadBytes: outbox?.bytes || 0,
+      outboxQuarantined: quarantined?.cnt || 0,
+      cursor: syncState?.cursor || null,
+      protocolVersion: this._bundleV2Available === false ? 1 : 2,
     };
   }
 
@@ -348,23 +448,26 @@ class SyncService extends EventEmitter {
         const delayedInvoice = delayedInvoiceFromSaleResult(result, saleInvoice);
         if (delayedInvoice) this._delayedInvoices.push(delayedInvoice);
 
-        db.run(`
-          UPDATE sales
-          SET sync_status  = 'synced',
-              cloud_id     = ?,
-              total_amount = ?,
-              synced_at    = datetime('now','localtime'),
-              sync_error   = NULL
-          WHERE local_id = ?
-        `, [
-          result.id || result.saleId || null,
-          // R4-#26/#43: reconciliar el total con el AUTORITATIVO del backend (recalcula con el precio de
-          // BD). Si el precio de catálogo cambió entre el cacheo offline y el sync, el revenue local
-          // queda alineado con la nube. Si el backend no lo devuelve, se conserva el local. NO se toca
-          // expected_amount (arqueo de efectivo: refleja el efectivo REAL cobrado, no se recalcula acá).
-          (result && typeof result.totalAmount === 'number') ? result.totalAmount : sale.total_amount,
-          sale.local_id,
-        ]);
+        db.transaction(() => {
+          db.run(`
+            UPDATE sales
+            SET sync_status  = 'synced',
+                cloud_id     = ?,
+                total_amount = ?,
+                synced_at    = datetime('now','localtime'),
+                sync_error   = NULL
+            WHERE local_id = ?
+          `, [
+            result.id || result.saleId || null,
+            // R4-#26/#43: reconciliar el total con el AUTORITATIVO del backend (recalcula con el precio de
+            // BD). Si el precio de catálogo cambió entre el cacheo offline y el sync, el revenue local
+            // queda alineado con la nube. Si el backend no lo devuelve, se conserva el local. NO se toca
+            // expected_amount (arqueo de efectivo: refleja el efectivo REAL cobrado, no se recalcula acá).
+            (result && typeof result.totalAmount === 'number') ? result.totalAmount : sale.total_amount,
+            sale.local_id,
+          ]);
+          acknowledgeLegacyOutbox(db, 'SALE', 'sales', sale.local_id);
+        });
 
         this._log('UPLOAD_SALE', `local_id=${sale.local_id} → cloud_id=${result.id}`, 'ok');
         console.log(`[SYNC] Sale ${sale.local_id} uploaded → cloud ${result.id}`);
@@ -434,10 +537,14 @@ class SyncService extends EventEmitter {
             ? db.get('SELECT sync_status FROM sales WHERE local_id = ?', [ret.sale_local_id])
             : null;
           if (!origin || origin.sync_status === 'needs_review') {
-            db.run(
-              "UPDATE returns SET sync_status = 'needs_review', sync_error = ? WHERE local_id = ?",
-              ['Venta original no sincronizable (needs_review o inexistente)', ret.local_id]
-            );
+            db.transaction(() => {
+              const message = 'Venta original no sincronizable (needs_review o inexistente)';
+              db.run(
+                "UPDATE returns SET sync_status = 'needs_review', sync_error = ? WHERE local_id = ?",
+                [message, ret.local_id]
+              );
+              quarantineLegacyOutbox(db, 'returns', ret.local_id, message);
+            });
             this._log('UPLOAD_RETURN', `local_id=${ret.local_id} needs_review: venta original no sincronizable`, 'error');
             console.warn(`[SYNC] Return ${ret.local_id} → needs_review: venta original no sincronizable`);
             continue;
@@ -466,37 +573,40 @@ class SyncService extends EventEmitter {
         const fiscal = result.fiscalDocument || {};
         const cloudReturnId = result.saleReturnId || result.id || null;
 
-        db.run(`
-          UPDATE returns
-          SET sync_status  = 'synced',
-              cloud_id     = ?,
-              sale_cloud_id = ?,
-              fiscal_status = ?,
-              fiscal_message = ?,
-              fiscal_invoice_id = ?,
-              fiscal_type = ?,
-              fiscal_number = ?,
-              fiscal_cae = ?,
-              fiscal_cae_expiration = ?,
-              fiscal_updated_at = ?,
-              fiscal_retryable = ?,
-              synced_at    = datetime('now','localtime'),
-              sync_error   = NULL
-          WHERE local_id = ?
-        `, [
-          cloudReturnId,
-          saleCloudId,
-          fiscal.status || 'FAILED',
-          fiscal.message || 'La nube no devolvió información fiscal para esta devolución.',
-          fiscal.invoiceId || null,
-          fiscal.type || null,
-          fiscal.number || null,
-          fiscal.cae || null,
-          fiscal.caeExpiration || null,
-          fiscal.updatedAt || null,
-          fiscal.retryable ? 1 : 0,
-          ret.local_id,
-        ]);
+        db.transaction(() => {
+          db.run(`
+            UPDATE returns
+            SET sync_status  = 'synced',
+                cloud_id     = ?,
+                sale_cloud_id = ?,
+                fiscal_status = ?,
+                fiscal_message = ?,
+                fiscal_invoice_id = ?,
+                fiscal_type = ?,
+                fiscal_number = ?,
+                fiscal_cae = ?,
+                fiscal_cae_expiration = ?,
+                fiscal_updated_at = ?,
+                fiscal_retryable = ?,
+                synced_at    = datetime('now','localtime'),
+                sync_error   = NULL
+            WHERE local_id = ?
+          `, [
+            cloudReturnId,
+            saleCloudId,
+            fiscal.status || 'FAILED',
+            fiscal.message || 'La nube no devolvió información fiscal para esta devolución.',
+            fiscal.invoiceId || null,
+            fiscal.type || null,
+            fiscal.number || null,
+            fiscal.cae || null,
+            fiscal.caeExpiration || null,
+            fiscal.updatedAt || null,
+            fiscal.retryable ? 1 : 0,
+            ret.local_id,
+          ]);
+          acknowledgeLegacyOutbox(db, 'RETURN', 'returns', ret.local_id);
+        });
 
         this._log('UPLOAD_RETURN', `local_id=${ret.local_id} → cloud_id=${cloudReturnId}`, 'ok');
         console.log(`[SYNC] Return ${ret.local_id} uploaded → cloud ${cloudReturnId}`);
@@ -593,14 +703,17 @@ class SyncService extends EventEmitter {
 
         const result = await apiClient.createCashMovement(payload);
 
-        db.run(`
-          UPDATE cash_movements
-          SET sync_status = 'synced',
-              cloud_id    = ?,
-              synced_at   = datetime('now','localtime'),
-              sync_error  = NULL
-          WHERE local_id = ?
-        `, [result.id || null, mov.local_id]);
+        db.transaction(() => {
+          db.run(`
+            UPDATE cash_movements
+            SET sync_status = 'synced',
+                cloud_id    = ?,
+                synced_at   = datetime('now','localtime'),
+                sync_error  = NULL
+            WHERE local_id = ?
+          `, [result.id || null, mov.local_id]);
+          acknowledgeLegacyOutbox(db, 'CASH_MOVEMENT', 'cash_movements', mov.local_id);
+        });
 
         this._log('UPLOAD_CASH_MOVEMENT', `local_id=${mov.local_id} → cloud_id=${result.id}`, 'ok');
         console.log(`[SYNC] Cash movement ${mov.local_id} uploaded → cloud ${result.id}`);
@@ -671,7 +784,10 @@ class SyncService extends EventEmitter {
           //    escalando a needs_review recién tras MAX_SYNC_RETRIES.
           const alreadyClosed = /already closed|ya\s+(est[aá]\s+)?cerrad|\bCLOSED\b|HTTP 409/i.test(closeErr.message || '');
           if (alreadyClosed) {
-            db.run("UPDATE cash_sessions SET sync_status='synced', synced_at=datetime('now','localtime'), sync_error=NULL WHERE id = ?", [sess.id]);
+            db.transaction(() => {
+              db.run("UPDATE cash_sessions SET sync_status='synced', synced_at=datetime('now','localtime'), sync_error=NULL WHERE id = ?", [sess.id]);
+              acknowledgeLegacyOutbox(db, ['CASH_SESSION_OPEN', 'CASH_SESSION_CLOSE'], 'cash_sessions', sess.id);
+            });
             this._log('UPLOAD_CASH_SESSION', `id=${sess.id} ya cerrada en la nube → synced`, 'ok');
             synced++;
             continue;
@@ -680,6 +796,7 @@ class SyncService extends EventEmitter {
           const cr = db.get('SELECT retry_count FROM cash_sessions WHERE id = ?', [sess.id]);
           if (cr && cr.retry_count >= MAX_SYNC_RETRIES) {
             db.run("UPDATE cash_sessions SET sync_status='needs_review' WHERE id = ?", [sess.id]);
+            quarantineLegacyOutbox(db, 'cash_sessions', sess.id, closeErr.message);
             this._log('UPLOAD_CASH_SESSION_CLOSE', `id=${sess.id} dead-letter tras ${cr.retry_count} intentos de cierre`, 'error');
           } else {
             this._log('UPLOAD_CASH_SESSION_CLOSE', `id=${sess.id} cierre falló (se reintenta el close): ${closeErr.message}`, 'error');
@@ -687,14 +804,17 @@ class SyncService extends EventEmitter {
           continue;
         }
 
-        db.run(`
-          UPDATE cash_sessions
-          SET sync_status = 'synced',
-              cloud_id    = ?,
-              synced_at   = datetime('now','localtime'),
-              sync_error  = NULL
-          WHERE id = ?
-        `, [cloudSessionId, sess.id]);
+        db.transaction(() => {
+          db.run(`
+            UPDATE cash_sessions
+            SET sync_status = 'synced',
+                cloud_id    = ?,
+                synced_at   = datetime('now','localtime'),
+                sync_error  = NULL
+            WHERE id = ?
+          `, [cloudSessionId, sess.id]);
+          acknowledgeLegacyOutbox(db, ['CASH_SESSION_OPEN', 'CASH_SESSION_CLOSE'], 'cash_sessions', sess.id);
+        });
 
         this._log('UPLOAD_CASH_SESSION', `id=${sess.id} → cloud_id=${cloudSessionId}`, 'ok');
         console.log(`[SYNC] Cash session ${sess.id} uploaded → cloud ${cloudSessionId}`);
@@ -747,24 +867,29 @@ class SyncService extends EventEmitter {
       // Without a transaction, a crash/close mid-loop leaves live products marked
       // active=0 → they vanish from the cashier's catalog until the next OK sync.
       db.transaction(() => {
-      db.exec('UPDATE products SET active = 0');
+      db.run('UPDATE products SET active = 0 WHERE client_id = ? AND sucursal_id = ?',
+        [Number(apiClient.clientId), Number(apiClient.sucursalId)]);
 
       for (const p of cloudProducts) {
         // Si el producto tiene movimientos locales pendientes, NO pisar su quantity (fragmento fijo,
         // no entrada de usuario → seguro interpolar).
         const qtyClause = pendingProductIds.has(p.id) ? '' : 'quantity=excluded.quantity,';
         db.run(`
-          INSERT INTO products (id, code, no_code, weighable, max_unit_price, name, description, price, cost,
-            cost_derived, quantity, low_stock_threshold, reorder_qty_default,
+          INSERT INTO products (id, code, no_code, stock_tracked, weighable, max_unit_price,
+            name, description, price, cost, cost_derived, quantity, cloud_quantity,
+            catalog_revision, price_proof, low_stock_threshold, reorder_qty_default,
             preferred_provider_id, preferred_provider_name,
-            category_ids, subcategory_ids, provider_ids, image_url, thumbnail_url, active, synced_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+            category_ids, subcategory_ids, provider_ids, image_url, thumbnail_url,
+            client_id, sucursal_id, active, synced_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
           ON CONFLICT(id) DO UPDATE SET
-            code=excluded.code, no_code=excluded.no_code,
+            code=excluded.code, no_code=excluded.no_code, stock_tracked=excluded.stock_tracked,
             weighable=excluded.weighable, max_unit_price=excluded.max_unit_price,
             name=excluded.name,
             description=excluded.description, price=excluded.price, cost=excluded.cost,
             cost_derived=excluded.cost_derived, ${qtyClause}
+            cloud_quantity=excluded.cloud_quantity,
+            catalog_revision=excluded.catalog_revision, price_proof=excluded.price_proof,
             low_stock_threshold=excluded.low_stock_threshold,
             reorder_qty_default=excluded.reorder_qty_default,
             preferred_provider_id=excluded.preferred_provider_id,
@@ -772,17 +897,20 @@ class SyncService extends EventEmitter {
             category_ids=excluded.category_ids, subcategory_ids=excluded.subcategory_ids,
             provider_ids=excluded.provider_ids,
             image_url=excluded.image_url, thumbnail_url=excluded.thumbnail_url,
+            client_id=excluded.client_id, sucursal_id=excluded.sucursal_id,
             active=1, synced_at=excluded.synced_at
         `, [
-          p.id, p.code || null, p.noCode ? 1 : 0,
+          p.id, p.code || null, p.noCode ? 1 : 0, p.stockTracked === false ? 0 : 1,
           p.weighable ? 1 : 0, p.maxUnitPrice ?? null,
           p.name, p.description || null,
-          p.price, p.cost || null, p.costDerived ? 1 : 0, p.quantity ?? 0,
+          p.price, p.cost || null, p.costDerived ? 1 : 0, p.quantity ?? 0, p.quantity ?? 0,
+          Number(p.catalogRevision || 0), p.priceProof || null,
           p.lowStockThreshold || null, p.reorderQtyDefault || null,
           p.preferredProviderId || null, p.preferredProviderName || null,
           JSON.stringify(p.categoryIds || []), JSON.stringify(p.subcategoryIds || []),
           JSON.stringify(p.providerIds || []),
           p.imageUrl || null, p.thumbnailUrl || null,
+          Number(apiClient.clientId), Number(apiClient.sucursalId),
           now,
         ]);
       }
@@ -906,8 +1034,11 @@ class SyncService extends EventEmitter {
     }
     const kind = classifySyncError(err);
     if (kind === 'permanent') {
-      db.run(`UPDATE ${table} SET sync_status = 'needs_review', sync_error = ? WHERE ${idCol} = ?`,
-        [err.message, idVal]);
+      db.transaction(() => {
+        db.run(`UPDATE ${table} SET sync_status = 'needs_review', sync_error = ? WHERE ${idCol} = ?`,
+          [err.message, idVal]);
+        quarantineLegacyOutbox(db, table, idVal, err.message);
+      });
       this._log(action, `${idCol}=${idVal} needs_review (4xx): ${err.message}`, 'error');
       console.error(`[SYNC] ${action} ${idVal} → needs_review:`, err.message);
       return;
@@ -917,7 +1048,10 @@ class SyncService extends EventEmitter {
       [err.message, idVal]);
     const row = db.get(`SELECT retry_count FROM ${table} WHERE ${idCol} = ?`, [idVal]);
     if (row && row.retry_count >= MAX_SYNC_RETRIES) {
-      db.run(`UPDATE ${table} SET sync_status = 'needs_review' WHERE ${idCol} = ?`, [idVal]);
+      db.transaction(() => {
+        db.run(`UPDATE ${table} SET sync_status = 'needs_review' WHERE ${idCol} = ?`, [idVal]);
+        quarantineLegacyOutbox(db, table, idVal, err.message);
+      });
       this._log(action, `${idCol}=${idVal} dead-letter tras ${row.retry_count} reintentos`, 'error');
     } else {
       this._log(action, `${idCol}=${idVal} error transitorio (intento ${row ? row.retry_count : '?'}): ${err.message}`, 'error');
@@ -938,4 +1072,10 @@ class SyncService extends EventEmitter {
   }
 }
 
-module.exports = { SyncService, delayedInvoiceFromSaleResult };
+module.exports = {
+  SyncService,
+  delayedInvoiceFromSaleResult,
+  supportsBundleV2,
+  acknowledgeLegacyOutbox,
+  quarantineLegacyOutbox,
+};

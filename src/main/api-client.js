@@ -8,6 +8,7 @@ const CONFIG_DEFAULTS = {
 
 const POS_VERSION = require('../../package.json').version;
 const POS_CONTRACT_VERSION = String(require('../../pos-contract.json').contractVersion);
+const zlib = require('zlib');
 
 const EventEmitter = require('events');
 
@@ -83,14 +84,17 @@ class ApiClient extends EventEmitter {
     try {
       const res = await fetch(url, {
         ...opts,
-        headers: this._headers(),
+        headers: { ...this._headers(), ...(opts.headers || {}) },
         signal: controller.signal,
       });
       clearTimeout(timeout);
       if (!res.ok) {
         const body = await res.text().catch(() => '');
         await this.handleAuthFailure(res.status, { path: url, responseBody: body });
-        throw new Error(`HTTP ${res.status}: ${body}`);
+        const error = new Error(`HTTP ${res.status}: ${body}`);
+        error.status = res.status;
+        error.responseBody = body;
+        throw error;
       }
       const text = await res.text();
       return text ? JSON.parse(text) : null;
@@ -284,6 +288,10 @@ class ApiClient extends EventEmitter {
     return this._fetch(`${this.baseUrl}/api/auth/me`);
   }
 
+  async getPosCompatibility() {
+    return this._fetch(`${this.baseUrl}/api/public/pos-compatibility?version=${encodeURIComponent(POS_VERSION)}`);
+  }
+
   // ── Products ─────────────────────────────────────────
 
   async getProducts() {
@@ -310,6 +318,20 @@ class ApiClient extends EventEmitter {
 
   async getSales(params = '') {
     return this._fetch(`${this._branchPath()}/sales${params ? '?' + params : ''}`);
+  }
+
+  /** POS protocol v2: one compressed round-trip for outbox mutations and cloud deltas. */
+  async syncBundle(bundle) {
+    const body = zlib.gzipSync(Buffer.from(JSON.stringify(bundle), 'utf8'));
+    return this._fetch(`${this._branchPath()}/pos-sync/v2`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Encoding': 'gzip',
+        'Accept-Encoding': 'gzip',
+      },
+      body,
+    });
   }
 
   async getSaleById(saleId) {

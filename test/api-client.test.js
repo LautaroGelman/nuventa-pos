@@ -41,7 +41,7 @@ test('identifica versión y contrato POS en cada request cloud', () => {
   const client = new ApiClient();
   const headers = client._headers();
   assert.match(headers['X-Nuventa-POS-Version'], /^\d+\.\d+\.\d+/);
-  assert.equal(headers['X-Nuventa-POS-Contract'], '1');
+  assert.equal(headers['X-Nuventa-POS-Contract'], '2');
 });
 
 test('consulta la disponibilidad autoritativa de cajas de la sucursal activa', async () => {

@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const { once } = require('events');
 const imageCache = require('../src/main/image-cache');
 const { createImageCache } = imageCache;
+const { BundleSyncV2 } = require('../src/main/sync-bundle-v2');
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0xff, 0xd9]);
 const smokeUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'nuventa-electron-smoke-'));
@@ -61,7 +62,7 @@ async function run() {
     db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('employee_name', 'Cajero Smoke')");
     db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('roles', '[\"ROLE_CAJERO\"]')");
     db.run("INSERT INTO cash_registers (id, code, name, active, client_id, sucursal_id) VALUES (77, 'SMOKE', 'Caja Smoke', 1, 1, 1)");
-    db.run("INSERT INTO products (id, code, name, price, quantity, active) VALUES (701, 'SALE-SMOKE', 'Producto Smoke', 100, 5, 1)");
+    db.run("INSERT INTO products (id, code, name, price, quantity, active, client_id, sucursal_id) VALUES (701, 'SALE-SMOKE', 'Producto Smoke', 100, 5, 1, 1, 1)");
     db.save();
 
     imageCache.initialize();
@@ -78,6 +79,11 @@ async function run() {
     if (!body.equals(JPEG)) throw new Error('Local image bytes differ from downloaded bytes');
 
     const branchUrl = `http://127.0.0.1:${localPort}/api/client-panel/1/sucursales/1`;
+    db.run("INSERT INTO products (id, code, name, price, quantity, active, client_id, sucursal_id) VALUES (702, 'OTHER-BRANCH', 'Producto Otra Sucursal', 250, 9, 1, 1, 2)");
+    const scopedCatalog = await fetch(`${branchUrl}/items`);
+    assert.equal(scopedCatalog.status, 200);
+    assert.deepEqual((await scopedCatalog.json()).map((product) => product.id), [701]);
+
     const salePayloadWithoutRegister = {
       saleDate: '2026-08-09T16:30:00',
       employeeId: 6,
@@ -164,6 +170,11 @@ async function run() {
       body: JSON.stringify({ cashRegisterId: 77, initialAmount: 0 }),
     });
     assert.equal(opened.status, 200, await opened.text());
+    const onlineOpenedSession = db.get("SELECT id, sync_status FROM cash_sessions WHERE cloud_id = 9002");
+    assert.equal(onlineOpenedSession.sync_status, 'synced');
+    assert.equal(db.get(`SELECT COUNT(*) AS cnt FROM sync_outbox
+      WHERE source_table='cash_sessions' AND source_id=? AND mutation_type='CASH_SESSION_OPEN'`,
+    [onlineOpenedSession.id]).cnt, 0);
     const reconciledOccupant = db.get("SELECT status, sync_status, sync_error FROM cash_sessions WHERE cloud_id = 9001");
     assert.equal(reconciledOccupant.status, 'FORCED_CLOSE');
     assert.equal(reconciledOccupant.sync_status, 'synced');
@@ -188,6 +199,8 @@ async function run() {
     assert.equal(persistedSale.cash_register_id, 77);
     assert.ok(persistedSale.cash_session_id > 0);
     assert.equal(db.get('SELECT quantity FROM products WHERE id = 701').quantity, 4);
+    const scopedSaleMutation = db.get("SELECT client_id,sucursal_id,state FROM sync_outbox WHERE mutation_type='SALE'");
+    assert.deepEqual(scopedSaleMutation, { client_id: 1, sucursal_id: 1, state: 'PENDING' });
 
     // Un segundo empleado en el mismo dispositivo no hereda ni puede vender sobre el turno del primero.
     db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('employee_id', '7')");
@@ -320,6 +333,47 @@ async function run() {
     apiClient.openSession = originalOpenSession;
     apiClient.token = originalToken;
     apiClient.lastHeartbeatAuthed = originalHeartbeat;
+
+    // Lost ACK: the durable frozen bundle remains retryable, and a DUPLICATE response clears it
+    // without replaying any local commercial effect.
+    const sentBundles = [];
+    const fakeV2Api = {
+      clientId: 1,
+      sucursalId: 1,
+      syncBundle: async (bundle) => {
+        sentBundles.push(bundle);
+        if (sentBundles.length === 1) throw new Error('simulated lost response');
+        return {
+          protocolVersion: 2,
+          serverTime: new Date().toISOString(),
+          results: bundle.mutations.map((mutation, index) => ({
+            idempotencyKey: mutation.idempotencyKey,
+            status: 'DUPLICATE',
+            cloudId: 8_000 + index,
+            result: { id: 8_000 + index, saleId: 155, fiscalDocument: { status: 'PENDING_SYNC' } },
+          })),
+          changes: [{
+            sequence: 1, entityType: 'PRODUCT', entityId: 701, action: 'UPSERT', revision: 4,
+            payload: { id: 701, code: 'SALE-SMOKE', name: 'Producto Smoke', price: 100,
+              cloudQuantity: 5, quantity: 5, catalogRevision: 4, priceProof: 'v1.smoke' },
+          }],
+          nextCursor: 'cursor-smoke', hasMore: false, resetRequired: false,
+        };
+      },
+    };
+    const bundleSync = new BundleSyncV2(fakeV2Api);
+    await assert.rejects(bundleSync.sync(), /simulated lost response/);
+    assert.ok(db.get("SELECT COUNT(*) count FROM sync_outbox WHERE state='PENDING'").count > 0);
+    db.run('UPDATE sync_outbox SET next_retry_at=NULL');
+    const bundleResult = await bundleSync.sync();
+    assert.ok(bundleResult.mutationCount > 0);
+    assert.equal(db.get('SELECT COUNT(*) count FROM sync_outbox').count, 0);
+    assert.equal(db.get('SELECT cursor FROM sync_state WHERE client_id=1 AND sucursal_id=1').cursor, 'cursor-smoke');
+    assert.equal(db.get('SELECT quantity FROM products WHERE id=701').quantity, 5);
+    assert.deepEqual(
+      sentBundles[0].mutations.map((mutation) => mutation.payloadHash),
+      sentBundles[1].mutations.map((mutation) => mutation.payloadHash),
+    );
 
     await imageCache.shutdown();
     await stopLocalServer();

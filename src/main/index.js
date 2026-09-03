@@ -10,7 +10,10 @@ const { app, BrowserWindow, ipcMain, dialog, session, Menu, net, shell } = requi
 const path = require('path');
 const fs   = require('fs');
 const configStore = require('./config-store');
-const { initDatabase, getDb, closeDatabase, backupDatabaseForUpdate } = require('./database');
+const {
+  initDatabase, getDb, closeDatabase, backupDatabaseForUpdate,
+  checkDatabaseIntegrity, setMaintenanceLock,
+} = require('./database');
 const { apiClient } = require('./api-client');
 const { authService } = require('./auth-service');
 const { SyncService } = require('./sync-service');
@@ -31,6 +34,7 @@ let tokenWatcherTimer = null;
 let lastKnownToken = null;
 let loggedOut = false; // set on logout to block token re-injection on next page load
 let sessionRevocationInProgress = false;
+let installQuitInProgress = false;
 
 // ── Enlarge cache ────────────────────────────────────────
 app.commandLine.appendSwitch('disk-cache-size', '524288000'); // 500 MB
@@ -215,6 +219,48 @@ function startOnlineCheck() {
 
 function stopOnlineCheck() {
   if (onlineCheckTimer) { clearInterval(onlineCheckTimer); onlineCheckTimer = null; }
+}
+
+async function installReadyUpdate() {
+  if (!updateService || updateService.getStatus().state !== 'ready') {
+    return { success: false, error: 'No hay una actualización lista para instalar.' };
+  }
+  setMaintenanceLock(true);
+  const prepared = await updateService.prepareInstallation(async (version) => {
+    if (syncService) {
+      syncService.stop();
+      await syncService.drain(3000);
+    }
+    checkDatabaseIntegrity();
+    const backup = backupDatabaseForUpdate(version);
+    if (!backup) throw new Error('No se pudo crear el backup previo');
+  });
+  if (!prepared) {
+    setMaintenanceLock(false);
+    if (syncService && apiClient.token) syncService.start();
+    return { success: false, error: updateService.getStatus().error };
+  }
+
+  stopOnlineCheck();
+  stopTokenWatcher();
+  await stopLocalServer();
+  closeDatabase();
+  installQuitInProgress = true;
+  if (updateService.installDownloadedUpdate()) return { success: true };
+  installQuitInProgress = false;
+
+  // If launching the installer fails synchronously, reopen the local services so the POS remains usable.
+  try {
+    await initDatabase();
+    await startLocalServer();
+    setMaintenanceLock(false);
+    startOnlineCheck();
+    startTokenWatcher();
+    if (syncService && apiClient.token) syncService.start();
+  } catch (error) {
+    console.error('[UPDATER] No se pudo reabrir el POS después del fallo:', error.message);
+  }
+  return { success: false, error: updateService.getStatus().error || 'No se pudo iniciar el instalador.' };
 }
 
 // ── API Interception ─────────────────────────────────────
@@ -561,6 +607,41 @@ function registerIpcHandlers() {
     return updateService.checkForUpdates({ force: true });
   });
 
+  ipcMain.handle('updater:retry', async (event) => {
+    if (!isTrustedSender(event) || !updateService) return { state: 'disabled' };
+    return updateService.retry();
+  });
+
+  ipcMain.handle('updater:install', async (event) => {
+    if (!isTrustedSender(event) || !updateService) return { success: false, error: 'Origen no autorizado.' };
+    return installReadyUpdate();
+  });
+
+  ipcMain.handle('updater:open-store', async (event) => {
+    if (!isTrustedSender(event)) return false;
+    await shell.openExternal('ms-windows-store://pdp/?productid=9MWQ82CX7C5B');
+    return true;
+  });
+
+  ipcMain.handle('diagnostics:export', async (event) => {
+    if (!isTrustedSender(event)) return { success: false, error: 'Origen no autorizado.' };
+    const sync = syncService ? syncService.getStatus() : {};
+    const update = updateService ? updateService.diagnostics() : {};
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Exportar diagnóstico de Nuventa POS',
+      defaultPath: `nuventa-pos-diagnostico-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePath) return { success: false, canceled: true };
+    fs.writeFileSync(result.filePath, JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      appVersion: app.getVersion(),
+      distribution: isMicrosoftStoreDistribution() ? 'store' : 'direct',
+      sync, update,
+    }, null, 2));
+    return { success: true };
+  });
+
   // ── Printer IPC ──────────────────────────────────────────
   // V2 centraliza configuración local, cola, tickets y PDFs en PrinterService.
   // Los tres handlers legacy se conservan para frontends empacados con una versión anterior.
@@ -785,8 +866,12 @@ function buildMenu() {
           click: () => {
             const db = getDb();
             const pendingSales = db.get("SELECT COUNT(*) as cnt FROM sales WHERE sync_status = 'pending'");
-            const productCount = db.get("SELECT COUNT(*) as cnt FROM products WHERE active = 1");
-            const registerCount = db.get("SELECT COUNT(*) as cnt FROM cash_registers");
+            const activeClientId = Number(db.get("SELECT value FROM app_config WHERE key='client_id'")?.value || 0);
+            const activeBranchId = Number(db.get("SELECT value FROM app_config WHERE key='sucursal_id'")?.value || 0);
+            const productCount = db.get(`SELECT COUNT(*) as cnt FROM products
+              WHERE active = 1 AND client_id = ? AND sucursal_id = ?`, [activeClientId, activeBranchId]);
+            const registerCount = db.get(`SELECT COUNT(*) as cnt FROM cash_registers
+              WHERE client_id = ? AND sucursal_id = ?`, [activeClientId, activeBranchId]);
             const lastSync = db.get("SELECT value FROM app_config WHERE key = 'last_product_sync'");
             const userCount = db.get("SELECT COUNT(*) as cnt FROM users");
             const imgStats = imageCache.getStats();
@@ -898,7 +983,7 @@ app.whenReady().then(async () => {
 
   loginEvents.on('login-success', (result) => {
     sessionRevocationInProgress = false;
-    console.log(`[MAIN] Login: ${result.user?.email} (offline=${result.isOffline})`);
+    console.log(`[MAIN] Login completed (offline=${result.isOffline})`);
     // apiClient was already configured by authService inside the login flow.
     // Start background sync only when we are online.
     if (syncService && !syncService._timer && !result.isOffline) {
@@ -991,18 +1076,34 @@ app.whenReady().then(async () => {
     }
   });
   syncService.on('products-updated', () => { console.log('[MAIN] Products updated from sync'); });
+  loginEvents.on('local-mutation', () => {
+    if (syncService) syncService.notifyLocalMutation();
+  });
   if (apiClient.token) syncService.start();
 
   // The Microsoft Store owns updates for MSIX installs. Direct NSIS installs
   // keep using electron-updater through the Nuventa R2 release feed.
-  updateService = createUpdateService();
+  const configuredUpdateFeed = process.env.NUVENTA_POS_UPDATE_FEED_URL
+    || configStore.get('updateFeedUrl');
+  const updateRequestHeaders = {};
+  if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
+    updateRequestHeaders['CF-Access-Client-Id'] = process.env.CF_ACCESS_CLIENT_ID;
+    updateRequestHeaders['CF-Access-Client-Secret'] = process.env.CF_ACCESS_CLIENT_SECRET;
+  }
+  updateService = createUpdateService({
+    feedUrl: configuredUpdateFeed,
+    requestHeaders: updateRequestHeaders,
+  });
   updateService.on('status', (status) => {
     console.log(`[UPDATER] ${status.state}${status.availableVersion ? ` v${status.availableVersion}` : ''}`);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('updater:status', status);
     }
   });
-  updateService.start({ disabled: configStore.isDev() || isMicrosoftStoreDistribution() });
+  updateService.start({
+    disabled: configStore.isDev(),
+    managedByStore: isMicrosoftStoreDistribution(),
+  });
 
   // 10. Load the app — web frontend (online) or fallback (offline)
   //     Cached token is injected by the preload script.
@@ -1010,31 +1111,16 @@ app.whenReady().then(async () => {
 });
 
 app.on('window-all-closed', async () => {
-  let updatePrepared = false;
+  if (installQuitInProgress) return;
   if (updateService) updateService.stop();
   stopOnlineCheck();
   stopTokenWatcher();
 
-  // Antes de borrar el token o cerrar SQLite, ejecutar SIEMPRE el sync final y consultar el feed.
-  // Ambas tareas son independientes y corren juntas para no alargar innecesariamente el cierre.
-  // Si el chequeo encuentra una versión, espera su descarga (con límite interno) para poder
-  // respaldar la base e instalarla en este mismo apagado.
-  await Promise.all([
-    syncService
-      ? syncService.syncBeforeShutdown().catch((err) => {
-          console.error('[SYNC] No se pudo completar la sincronización final:', err.message);
-        })
-      : Promise.resolve(),
-    updateService
-      ? updateService.checkForUpdatesBeforeShutdown().then((status) => {
-          if (status.shutdownWaitTimedOut) {
-            console.warn('[UPDATER] La descarga no terminó dentro del tiempo de cierre; se reanudará al iniciar.');
-          }
-        }).catch((err) => {
-          console.error('[UPDATER] No se pudo completar el chequeo final:', err.message);
-        })
-      : Promise.resolve(),
-  ]);
+  // El cierre normal nunca inicia red ni espera una descarga. Sólo concede hasta 3 s a una
+  // sincronización que ya estaba en vuelo; el outbox ya está persistido.
+  if (syncService) await syncService.syncBeforeShutdown().catch((err) => {
+    console.error('[SYNC] No se pudo drenar la sincronización en curso:', err.message);
+  });
 
   // Clear cached token on exit — user must log in again on next launch.
   try {
@@ -1043,14 +1129,10 @@ app.on('window-all-closed', async () => {
     db.run("DELETE FROM app_config WHERE key = 'roles'"); // R4-#37: roles no deben sobrevivir a otro login
     db.run("UPDATE users SET last_token = NULL"); // A10: que el login offline no reuse el token tras cerrar la app
     db.save();
-    if (updateService) {
-      updatePrepared = await updateService.prepareForShutdown(backupDatabaseForUpdate);
-    }
   } catch { /* best-effort */ }
   await imageCache.shutdown();
   await stopLocalServer();
   closeDatabase();
-  if (updatePrepared && updateService.installDownloadedUpdate()) return;
   app.quit();
 });
 

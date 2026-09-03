@@ -1,46 +1,32 @@
 # Microsoft Store (MSIX)
 
-La edicion de Microsoft Store se publica como MSIX x64 sin firma. Partner Center vuelve a firmar el
-paquete y Microsoft Store administra sus actualizaciones. En ejecucion, Electron expone
-`process.windowsStore`; Nuventa usa esa señal para deshabilitar `electron-updater` solamente en la
-edicion Store. El instalador NSIS directo conserva las actualizaciones desde R2.
+El MSIX x64 contiene el mismo frontend, código y `build-provenance.json` que el NSIS. Se genera sin
+firma de CA: Partner Center firma el paquete al publicarlo. Cuando Electron informa
+`process.windowsStore`, el estado del actualizador es `managed-by-store` y no se crea ninguna
+petición hacia R2.
 
-## Identidad requerida
+## Compilación
 
-Reservar `Nuventa POS` en Partner Center y copiar desde **Product management > Product identity**:
-
-- `Package/Identity/Name`
-- `Package/Identity/Publisher`
-- `Package/Properties/PublisherDisplayName`
-
-Los valores distinguen mayusculas, espacios y puntuacion. No deben inventarse ni normalizarse.
-
-## Compilar
+Se necesitan los valores exactos de **Product identity** de Partner Center:
 
 ```powershell
-$env:MS_STORE_PACKAGE_NAME = '<Identity Name>'
-$env:MS_STORE_PUBLISHER = '<Publisher>'
-$env:MS_STORE_PUBLISHER_DISPLAY_NAME = '<Publisher display name>'
-$env:NUVENTA_FRONTEND_DIR = '..\nuventa-frontend-pos-release'
-npm run build:store
+$env:MS_STORE_PACKAGE_NAME = '<Package/Identity/Name>'
+$env:MS_STORE_PUBLISHER = '<Package/Identity/Publisher>'
+$env:MS_STORE_PUBLISHER_DISPLAY_NAME = '<PublisherDisplayName>'
+npm run build:store -- -Version 1.1.0.0
 ```
 
-El resultado se escribe en `dist/store/Nuventa-POS_<version>_x64.msix`. La version se deriva de
-`package.json` y se convierte a `Major.Minor.Build.0`, ya que el cuarto bloque queda reservado para
-Microsoft Store.
+El resultado es `dist/store/Nuventa-POS_1.1.0.0_x64.msix`. La versión debe superar la mayor ya
+reservada en Partner Center.
 
-Antes de cada envio, probar caja, impresion, modo offline, sincronizacion y cierre seguro en una
-instalacion MSIX firmada para desarrollo, y ejecutar Windows App Certification Kit.
+## Flight privado
 
-## Automatizacion
+Con `publish_store_flight=true`, el workflow:
 
-El workflow principal genera tambien el MSIX cuando existen estos secretos en el repositorio POS:
+1. Empaqueta el MSIX desde la misma salida web ya probada.
+2. Ejecuta Windows App Certification Kit.
+3. Configura Microsoft Store Developer CLI con credenciales Entra de Partner Center.
+4. Envía el paquete al `MS_STORE_FLIGHT_ID` del producto `9MWQ82CX7C5B` y espera la certificación.
 
-- `MS_STORE_PACKAGE_NAME`
-- `MS_STORE_PUBLISHER`
-- `MS_STORE_PUBLISHER_DISPLAY_NAME`
-
-Por lo tanto, un cambio en `main` del frontend dispara una nueva compilacion NSIS y MSIX con el
-commit exacto del frontend. El MSIX queda como artifact de GitHub listo para una nueva submission;
-Partner Center distribuye la actualizacion despues de la carga y certificacion. Los cambios de
-backend compatibles se consumen directamente desde la API y no requieren reinstalar el POS.
+El piloto no instala simultáneamente NSIS y MSIX. Para cambiar de canal primero se vacía el outbox,
+se desinstala el canal anterior y se vuelve a iniciar sesión.

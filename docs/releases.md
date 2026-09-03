@@ -1,53 +1,54 @@
 # Releases, descarga y actualización automática
 
-## Modo temporal de prueba sin firma
+El código funcional se compila una vez y se distribuye por dos canales:
 
-La variable de repositorio `POS_ALLOW_UNSIGNED_RELEASE=true` habilita una publicación de prueba
-sin Authenticode. El manifest deja constancia con `signed: false` y el workflow muestra una
-advertencia visible. Al configurar la firma se debe eliminar la variable o cambiarla a `false`;
-la firma obligatoria sigue siendo el comportamiento predeterminado.
+- NSIS (`.exe`): consulta `https://descargas.nuventa.com.ar/direct/latest.yml` con
+  `electron-updater`.
+- MSIX: Microsoft Store es el único actualizador; la aplicación no configura ni consulta R2.
 
-El canal estable vive en `https://descargas.nuventa.com.ar`. El instalador NSIS incluye el
-frontend estático correspondiente a un commit exacto y `electron-updater` consulta
-`/stable/latest.yml` cada seis horas. La descarga ocurre en segundo plano y la instalación se
-habilita al cerrar únicamente después de guardar y respaldar SQLite.
+La versión es SemVer explícita (`1.1.0`) y Store usa cuatro bloques (`1.1.0.0`). Cada paquete
+incluye `build-provenance.json` con los commits exactos de POS, frontend y backend y el contrato.
 
-## Activación inicial
+## Anillos R2
 
-1. Crear el bucket privado `nuventa-pos-releases` en Cloudflare R2.
-2. Asociar el dominio público `descargas.nuventa.com.ar` al bucket y esperar DNS/HTTPS válidos.
-3. Configurar CORS del bucket para `GET` y `HEAD` desde `https://nuventa.com.ar`,
-   `https://www.nuventa.com.ar` y `https://app.nuventa.com.ar`. No permitir escrituras públicas.
-4. Obtener un certificado Authenticode OV/EV exportable como PFX con timestamp habilitado.
-5. Cargar los secretos del workflow de producción:
+- `/pilot`: piloto privado protegido por Cloudflare Access. Nunca se enlaza desde el sitio.
+- `/direct`: descarga pública. Sin Authenticode se identifica como **Vista previa**.
+- `/stable`: alias de compatibilidad y canal estable. Requiere Authenticode válido, timestamp y
+  publisher esperado.
 
-| Repositorio | Secreto | Uso |
-|---|---|---|
-| POS | `WINDOWS_CSC_LINK` / `WINDOWS_CSC_KEY_PASSWORD` | Firma obligatoria del instalador. |
-| POS | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` / `R2_ENDPOINT_URL` | Publicación S3-compatible en R2. |
-| POS | `FRONTEND_REPOSITORY_TOKEN` | Checkout del commit exacto del frontend. |
-| Frontend | `POS_RELEASE_DISPATCH_TOKEN` | Evento `frontend_main_updated` hacia el POS. |
-| POS | `MS_STORE_PACKAGE_NAME` / `MS_STORE_PUBLISHER` / `MS_STORE_PUBLISHER_DISPLAY_NAME` | Identidad exacta de Partner Center para generar el MSIX. |
+Los objetos con versión son inmutables. El publicador rechaza reutilizar una versión con bytes
+distintos. Primero sube `.exe`, blockmap y manifiestos con caché inmutable; luego actualiza los
+punteros `Nuventa-POS-Setup-latest.exe`, `release.json` y, al final, `latest.yml` con `no-store`.
+La promoción entre anillos descarga y verifica los bytes ya probados: nunca recompila.
 
-Los tokens fine-grained deben limitarse al repositorio y permiso mínimos indicados. El environment
-`production` del POS no requiere aprobación manual porque el canal estable elegido es automático.
+## Secretos del workflow
 
-## Publicación
+| Uso | Secretos |
+|---|---|
+| R2 | `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ENDPOINT_URL` |
+| Purga pública | `CF_CACHE_PURGE_TOKEN`, `CF_ZONE_ID` |
+| Piloto privado | `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET` |
+| Repos relacionados | `FRONTEND_REPOSITORY_TOKEN`, opcionalmente `BACKEND_REPOSITORY_TOKEN` |
+| Authenticode | `WINDOWS_CSC_LINK`, `WINDOWS_CSC_KEY_PASSWORD`, `WIN_CSC_PUBLISHER_NAME` |
+| Identidad MSIX | `MS_STORE_PACKAGE_NAME`, `MS_STORE_PUBLISHER`, `MS_STORE_PUBLISHER_DISPLAY_NAME` |
+| Flight Store | `MS_STORE_FLIGHT_ID`, `PARTNER_CENTER_TENANT_ID`, `PARTNER_CENTER_SELLER_ID`, `PARTNER_CENTER_CLIENT_ID`, `PARTNER_CENTER_CLIENT_SECRET` |
 
-- Un push a `master` del POS o un evento desde `main` del frontend ejecuta el workflow central.
-- La versión es `1.0.<run_number>` y siempre crece dentro del workflow.
-- Se ejecutan tests, export estático, empaquetado NSIS, firma y validación Authenticode.
-- Se suben primero `.exe` y `.blockmap` versionados. El alias, `release.json` y finalmente
-  `latest.yml` se publican solo después del smoke público.
-- `release.json` registra hashes y commits de ambos repositorios. Los objetos versionados son
-  inmutables; el alias y metadatos usan `no-cache`.
+El bucket aplica CORS de solo lectura para `nuventa.com.ar` y `www.nuventa.com.ar`. Ningún token,
+payload comercial o secreto de Access se escribe en diagnósticos.
 
-## Compatibilidad y recuperación
+## Publicar
 
-`pos-contract.json` declara el contrato que entiende Electron. El backend expone
-`GET /api/public/pos-compatibility` y su workflow bloquea contratos fuera del rango soportado.
-Todo contrato anterior se conserva al menos 30 días antes de elevar el mínimo.
+Ejecutar manualmente `Release Windows POS` con versión, anillo y commits exactos. `pilot` y
+`direct` admiten `unsigned_preview=true`; `stable` lo bloquea. El workflow corre pruebas, genera el
+instalador, valida firma/publisher, publica, vuelve a descargar los cuatro archivos y compara hashes
+y el contenido exacto de `latest.yml`. El piloto comprueba además que el instalador no sea descargable
+sin las credenciales de Access.
 
-Antes de instalar, el POS conserva las dos últimas copias `pre-update-*.db` en
-`%APPDATA%/nuventa-pos/backups`. Una corrección se publica como una versión nueva superior; nunca se
-apunta `latest.yml` a una versión menor porque el autoactualizador no hace downgrade.
+La página `/descargar` consume exclusivamente `/direct/release.json`; si falta o es inválido no
+inventa un enlace alternativo.
+
+## Recuperación
+
+Antes de `quitAndInstall`, el POS bloquea operaciones nuevas, drena hasta tres segundos la petición
+en curso, ejecuta `PRAGMA integrity_check` y crea un backup verificado. Un fallo cancela la
+instalación y vuelve a habilitar el POS. Un rollback se publica siempre con una versión superior.
