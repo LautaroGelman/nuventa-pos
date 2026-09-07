@@ -624,8 +624,8 @@ function registerIpcHandlers() {
       const result = await dialog.showMessageBox(mainWindow, {
         type: 'info',
         title: 'Actualizar Nuventa POS',
-        message: 'Antes de actualizar',
-        detail: 'Nuventa se cerrará para instalar la actualización y volverá a abrirse.\n\nWindows puede mostrar un cartel que pregunta si permitís que Nuventa haga cambios en el equipo. Seleccioná “Sí” o “Aceptar” para continuar.\n\nSi elegís “No” en Windows, la actualización no se instalará. Podés volver a abrir Nuventa y seguir trabajando; no volveremos a pedirte instalar esta versión.\n\nSi ahora preferís seguir trabajando, elegí “Ahora no”. Podés retomarla desde el menú Nuventa POS → Buscar actualizaciones.',
+        message: 'Seleccioná “Sí” o “Aceptar” en el aviso de Windows',
+        detail: 'Nuventa se reiniciará para actualizarse.',
         buttons: ['Continuar y actualizar', 'Ahora no'],
         defaultId: 1,
         cancelId: 1,
