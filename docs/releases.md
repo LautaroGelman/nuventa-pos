@@ -71,6 +71,11 @@ POS. En ese caso puede volver a abrirlo sin otro pedido automático. El menú
 **Nuventa POS → Buscar actualizaciones** permite retomar el aviso voluntariamente.
 Una versión nueva puede mostrar su propio aviso.
 
+El botón **Actualizar** de la barra superior permanece visible aunque se posponga
+el cartel. Antes de cerrar sesión con una descarga lista, el POS recuerda actualizar;
+permite actualizar, cancelar el cierre o cerrar sesión de todos modos. La confirmación
+ocurre antes de invalidar el token tanto desde el frontend como desde el menú nativo.
+
 Antes de `quitAndInstall`, el POS bloquea operaciones nuevas, drena hasta tres segundos la petición
 en curso, ejecuta `PRAGMA integrity_check` y crea un backup verificado. Un fallo cancela la
 instalación y vuelve a habilitar el POS. Un rollback se publica siempre con una versión superior.

@@ -79,6 +79,7 @@ class UpdateService extends EventEmitter {
     this._downloadedVersion = null;
     this._installationPrepared = false;
     this._confirmationPromise = null;
+    this._logoutConfirmationPromise = null;
     this._started = false;
     this._history = [];
     this._diagnosticPath = typeof app.getPath === 'function'
@@ -197,6 +198,20 @@ class UpdateService extends EventEmitter {
     });
     try { return await this._confirmationPromise; }
     finally { this._confirmationPromise = null; }
+  }
+
+  async confirmLogout(confirm, install) {
+    if (this._logoutConfirmationPromise) return this._logoutConfirmationPromise;
+    if (this._status.state === 'installing') return false;
+    if (!this._downloadedVersion) return true;
+    this._logoutConfirmationPromise = Promise.resolve().then(async () => {
+      const choice = await confirm();
+      if (choice === 1) { this.defer(); return true; }
+      if (choice === 0) { await this.retry(); await install(); }
+      return false;
+    });
+    try { return await this._logoutConfirmationPromise; }
+    finally { this._logoutConfirmationPromise = null; }
   }
 
   async prepareInstallation(prepare) {

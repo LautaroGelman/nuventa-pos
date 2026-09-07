@@ -222,6 +222,33 @@ function stopOnlineCheck() {
   if (onlineCheckTimer) { clearInterval(onlineCheckTimer); onlineCheckTimer = null; }
 }
 
+async function requestUpdateInstallation() {
+  if (!updateService) return { success: false };
+  return updateService.confirmInstallation(async () => {
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: 'info', title: 'Actualizar Nuventa POS',
+      message: 'Seleccioná “Sí” o “Aceptar” en el aviso de Windows',
+      detail: 'Nuventa se reiniciará para actualizarse.',
+      buttons: ['Continuar y actualizar', 'Ahora no'],
+      defaultId: 1, cancelId: 1, noLink: true,
+    });
+    return result.response === 0;
+  }, installReadyUpdate);
+}
+
+async function confirmLogoutWithUpdate() {
+  if (!updateService) return true;
+  return updateService.confirmLogout(async () => {
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: 'info', title: 'Actualización pendiente',
+      message: 'Actualizá el programa antes de cerrar el programa',
+      buttons: ['Actualizar ahora', 'Cerrar sesión de todos modos', 'Cancelar'],
+      defaultId: 0, cancelId: 2, noLink: true,
+    });
+    return result.response;
+  }, requestUpdateInstallation);
+}
+
 async function installReadyUpdate() {
   if (!updateService || updateService.getStatus().state !== 'ready') {
     return { success: false, error: 'No hay una actualización lista para instalar.' };
@@ -620,19 +647,12 @@ function registerIpcHandlers() {
 
   ipcMain.handle('updater:install', async (event) => {
     if (!isTrustedSender(event) || !updateService) return { success: false, error: 'Origen no autorizado.' };
-    return updateService.confirmInstallation(async () => {
-      const result = await dialog.showMessageBox(mainWindow, {
-        type: 'info',
-        title: 'Actualizar Nuventa POS',
-        message: 'Seleccioná “Sí” o “Aceptar” en el aviso de Windows',
-        detail: 'Nuventa se reiniciará para actualizarse.',
-        buttons: ['Continuar y actualizar', 'Ahora no'],
-        defaultId: 1,
-        cancelId: 1,
-        noLink: true,
-      });
-      return result.response === 0;
-    }, installReadyUpdate);
+    return requestUpdateInstallation();
+  });
+
+  ipcMain.handle('updater:before-logout', async (event) => {
+    if (!isTrustedSender(event)) return false;
+    return confirmLogoutWithUpdate();
   });
 
   ipcMain.handle('updater:defer', (event) => {
@@ -868,7 +888,8 @@ function buildMenu() {
         {
           label: 'Cerrar sesión',
           accelerator: 'CmdOrCtrl+Shift+L',
-          click: () => {
+          click: async () => {
+            if (!await confirmLogoutWithUpdate()) return;
             // Clear DB token FIRST so the preload won't re-inject it
             // when the page navigates to /login.
             loggedOut = true;

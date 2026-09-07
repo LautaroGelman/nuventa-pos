@@ -42,6 +42,24 @@ test('no consulta el feed en desarrollo', async () => {
   assert.equal(updater.checks, 0);
 });
 
+test('cerrar sesión advierte incluso después de posponer y respeta cada decisión', async () => {
+  const { service, updater } = createService();
+  service.start();
+  try {
+    let confirmations = 0, installations = 0;
+    assert.equal(await service.confirmLogout(() => { confirmations++; }, () => { installations++; }), true);
+    assert.equal(confirmations, 0);
+    updater.emit('update-downloaded', { version: '1.0.2' });
+    service.defer();
+    assert.equal(await service.confirmLogout(async () => 2, () => { installations++; }), false);
+    assert.equal(installations, 0);
+    assert.equal(await service.confirmLogout(async () => 1, () => { installations++; }), true);
+    assert.equal(installations, 0);
+    assert.equal(await service.confirmLogout(async () => 0, () => { installations++; }), false);
+    assert.equal(installations, 1);
+  } finally { service.stop(); }
+});
+
 test('rechazar el aviso no instala y conserva la decisión al reiniciar', async () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'pos-update-defer-'));
   const app = { isPackaged: true, getVersion: () => '1.0.1', getPath: () => directory };
