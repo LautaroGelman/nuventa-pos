@@ -283,6 +283,33 @@ app.whenReady().then(async()=>{
  assert.equal(byName.weighable_pending_overlay.afterPull,100);
  assert.equal(byName.updater_library_failure_reports_success.reportedSuccess,false);
  assert.equal(byName.late_api_401_revokes_new_login.newLoginRevoked,false);
+ reset();
+ const tutorialRequests = [];
+ const tutorialCloud = require('http').createServer((req, res) => {
+  let body = '';
+  req.on('data', chunk => { body += chunk; });
+  req.on('end', () => {
+   tutorialRequests.push({method:req.method, path:req.url, body, authorization:req.headers.authorization});
+   res.writeHead(200, {'Content-Type':'application/json'});
+   res.end(JSON.stringify({status:'DISMISSED', revision:1}));
+  });
+ });
+ await new Promise(resolve => tutorialCloud.listen(0, '127.0.0.1', resolve));
+ try {
+  apiClient.setBaseUrl(`http://127.0.0.1:${tutorialCloud.address().port}`);
+  const url = `http://127.0.0.1:${port}/api/client-panel/1/onboarding`;
+  assert.equal((await fetch(url)).status, 200);
+  assert.equal((await fetch(url, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'DISMISSED'})})).status, 200);
+  assert.equal((await fetch(url.replace('/1/', '/2/'))).status, 403);
+  assert.equal(tutorialRequests.length, 2);
+  assert.equal(tutorialRequests[1].method, 'PUT');
+  assert.deepEqual(JSON.parse(tutorialRequests[1].body), {status:'DISMISSED'});
+  assert.equal(tutorialRequests[1].authorization, 'Bearer audit-synthetic-token');
+  assert.equal(db.get('SELECT COUNT(*) AS n FROM sync_outbox').n, 0);
+  record('cashier_tutorial_progress_is_scoped_and_never_queued',{passed:true});
+ } finally {
+  await new Promise(resolve => tutorialCloud.close(resolve));
+ }
  console.log(`[REGRESSION] ${results.length} escenarios verificados`);
  }finally{if(process.env.NUVENTA_REGRESSION_RESULTS) fs.writeFileSync(process.env.NUVENTA_REGRESSION_RESULTS,JSON.stringify(results,null,2));await stopLocalServer();database.closeDatabase();app.quit();}
 }).catch(e=>{console.error(e.stack);app.exit(1);});

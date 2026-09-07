@@ -2996,6 +2996,15 @@ function startLocalServer() {
         // Cloud-only routes (dashboard, reports, finance, employees, etc.)
         // Admin/Owner → proxy to cloud
         // Cajero/Inventario → 403 blocked
+        // Tutorial progress is online-only user metadata, including for cashiers.
+        // It must never enter the business outbox.
+        if (subpath === '/onboarding' && (req.method === 'GET' || req.method === 'PUT')) {
+          if (Number(route.clientId) !== Number(getConfigVal(getDb(), 'client_id'))) {
+            return jsonResponse(res, 403, { error: 'El tutorial debe corresponder al comercio activo.' });
+          }
+          return await proxyToCloud(req, res, req.method, req.url, body);
+        }
+
         const localCashierBranchList = req.method === 'GET'
           && subpath === '/sucursales'
           && !getUserRoles().some((role) => ['ROLE_PROPIETARIO', 'ROLE_OWNER'].includes(String(role).toUpperCase()));

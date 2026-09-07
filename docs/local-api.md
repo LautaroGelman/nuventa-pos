@@ -265,3 +265,10 @@ SQLite después de esperar la nube, evitando reactivar un cierre confirmado mien
 Cerrar una caja emite `cash-session-closed` después del commit durable, también al devolver un
 cierre ya existente por ID. El main solicita un ciclo urgente de sincronización, sin esperar la
 hora ni el backoff acumulado. Los rechazos de validación o persistencia no emiten ese evento.
+# Tutorial guiado
+
+`GET` y `PUT /api/client-panel/{clientId}/onboarding` se reenvían a la nube
+para todos los roles del comercio, incluidos cajero e inventario. Se verifica
+el comercio activo antes del proxy y se conserva el JWT del usuario. El backend
+resuelve los permisos y el progreso individual. Requiere conexión y no crea
+mutaciones en el outbox. Regresión: `cashier_tutorial_progress_is_scoped_and_never_queued`.
