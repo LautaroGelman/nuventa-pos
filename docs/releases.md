@@ -36,6 +36,12 @@ La promoción entre anillos descarga y verifica los bytes ya probados: nunca rec
 El bucket aplica CORS de solo lectura para `nuventa.com.ar` y `www.nuventa.com.ar`. Ningún token,
 payload comercial o secreto de Access se escribe en diagnósticos.
 
+La publicación normal usa acceso a objetos R2 y verifica CORS sobre el manifiesto
+versionado antes de cambiar los punteros. Configurar CORS es una tarea inicial de
+administración (`publish-release.ps1 -ConfigureBucketCors`), no requiere ampliar
+los permisos del token de publicación. El backend se registra con un SHA completo
+en la procedencia; no se descarga ni se despliega en este workflow.
+
 ## Publicar
 
 Ejecutar manualmente `Release Windows POS` con versión, anillo y commits exactos. `pilot` y

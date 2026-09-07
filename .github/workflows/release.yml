@@ -193,6 +193,7 @@ jobs:
           msstore flights submission poll 9MWQ82CX7C5B $env:MS_STORE_FLIGHT_ID
 
       - name: Keep release evidence
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: nuventa-pos-${{ inputs.version }}-${{ inputs.ring }}

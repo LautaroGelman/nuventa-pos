@@ -4,7 +4,8 @@ param(
   [Parameter(Mandatory = $true)][string]$FrontendCommit,
   [Parameter(Mandatory = $true)][string]$PosCommit,
   [ValidateSet('pilot', 'direct', 'stable')][string]$Ring = 'pilot',
-  [switch]$AllowUnsignedPreview
+  [switch]$AllowUnsignedPreview,
+  [switch]$ConfigureBucketCors
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,10 +73,12 @@ $manifestPath = Join-Path $PSScriptRoot '..\dist\release.json'
 } | ConvertTo-Json | Set-Content -LiteralPath $manifestPath -Encoding utf8
 
 $endpointArgs = @('--endpoint-url', $env:R2_ENDPOINT_URL, '--no-progress')
-$corsFile = Join-Path $PSScriptRoot 'r2-cors.json'
-aws s3api put-bucket-cors --bucket $env:R2_BUCKET --cors-configuration "file://$corsFile" `
-  --endpoint-url $env:R2_ENDPOINT_URL
-if ($LASTEXITCODE -ne 0) { throw 'Could not apply the R2 browser CORS policy.' }
+if ($ConfigureBucketCors) {
+  $corsFile = Join-Path $PSScriptRoot 'r2-cors.json'
+  aws s3api put-bucket-cors --bucket $env:R2_BUCKET --cors-configuration "file://$corsFile" `
+    --endpoint-url $env:R2_ENDPOINT_URL
+  if ($LASTEXITCODE -ne 0) { throw 'Could not apply the R2 browser CORS policy.' }
+}
 function Upload([string]$File, [string]$Key, [string]$ContentType, [string]$CacheControl) {
   aws s3 cp $File "s3://$($env:R2_BUCKET)/$Key" @endpointArgs `
     --content-type $ContentType --cache-control $CacheControl
@@ -107,6 +110,17 @@ UploadImmutable $setup "$Ring/$versionedName" 'application/vnd.microsoft.portabl
 UploadImmutable $blockmap "$Ring/$versionedName.blockmap" 'application/octet-stream'
 UploadImmutable $latest "$Ring/latest-$Version.yml" 'text/yaml; charset=utf-8'
 UploadImmutable $manifestPath "$Ring/release-$Version.json" 'application/json; charset=utf-8'
+
+# Normal publication needs object access only. Bucket CORS is provisioned once by
+# an administrator, and verified here before changing any public channel pointer.
+if ($Ring -ne 'pilot') {
+  foreach ($origin in @('https://nuventa.com.ar', 'https://www.nuventa.com.ar')) {
+    $corsResponse = Invoke-WebRequest -Uri "$ringUrl/release-$Version.json" -Headers @{ Origin = $origin } -UseBasicParsing
+    if ($corsResponse.Headers['Access-Control-Allow-Origin'] -notin @($origin, '*')) {
+      throw "The release is not readable from $origin. Configure bucket CORS before publishing the channel."
+    }
+  }
+}
 
 # Mutable pointers last and always no-store.
 Upload $setup "$Ring/Nuventa-POS-Setup-latest.exe" 'application/vnd.microsoft.portable-executable' 'no-cache,no-store,must-revalidate'
