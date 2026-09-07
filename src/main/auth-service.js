@@ -238,11 +238,13 @@ class AuthService {
     // máximo de ambos para no bloquear a un cajero cuyo equipo sí estuvo online (vía sync) aunque no
     // haya vuelto a loguearse en 7 días.
     const cfgOnline = db.get("SELECT value FROM app_config WHERE key = 'last_online_at'");
-    const onlineCandidates = [localUser.last_online_at, cfgOnline && cfgOnline.value]
+    const sameEmployee = Number(db.get("SELECT value FROM app_config WHERE key='employee_id'")?.value) === Number(localUser.employee_id);
+    const onlineCandidates = [localUser.last_online_at, sameEmployee && cfgOnline && cfgOnline.value]
       .filter(Boolean)
       .map((s) => new Date(s).getTime())
       .filter((t) => !Number.isNaN(t));
     const lastOnlineMs = onlineCandidates.length ? Math.max(...onlineCandidates) : null;
+    if (!lastOnlineMs) return { success: false, isOffline: true, error: 'Conectate para validar el primer ingreso de este usuario.' };
     if (lastOnlineMs) {
       const daysSinceOnline = (Date.now() - lastOnlineMs) / (1000 * 60 * 60 * 24);
       if (daysSinceOnline > OFFLINE_MAX_DAYS) {
@@ -292,7 +294,24 @@ class AuthService {
     }
 
     // Configure API client with cached data
-    const token = localUser.last_token ? decryptToken(localUser.last_token) : 'offline-session-token';
+    const roles = this._parseRoles(localUser.roles);
+    const cached = localUser.last_token ? decryptToken(localUser.last_token) : null;
+    let cachedExpiry = 0;
+    try { cachedExpiry = JSON.parse(Buffer.from(cached.split('.')[1], 'base64url')).exp * 1000; } catch { /* no remote credential */ }
+    const expiresAt = lastOnlineMs + OFFLINE_MAX_DAYS * 86400000;
+    const token = cachedExpiry > Date.now() ? cached : require('./offline-session').createOfflineSession({
+      sub: email, clientId: localUser.client_id, sucursalId: localUser.sucursal_id,
+      employeeId: localUser.employee_id, employeeName: localUser.employee_name,
+      clientName: localUser.client_name, roles,
+    }, expiresAt);
+    db.transaction(() => {
+      for (const [key, value] of Object.entries({ auth_token: encryptToken(token),
+        client_id: localUser.client_id, sucursal_id: localUser.sucursal_id,
+        employee_id: localUser.employee_id, employee_name: localUser.employee_name,
+        client_name: localUser.client_name, roles: JSON.stringify(roles) })) {
+        db.run('INSERT OR REPLACE INTO app_config(key,value) VALUES (?,?)', [key, String(value ?? '')]);
+      }
+    });
     apiClient.setAuth({
       token,
       clientId: localUser.client_id,
@@ -300,7 +319,6 @@ class AuthService {
       employeeId: localUser.employee_id,
     });
 
-    const roles = this._parseRoles(localUser.roles);
     this._currentUser = {
       email,
       token,
@@ -727,7 +745,10 @@ class AuthService {
    */
   async _checkOnline() {
     try {
-      return await apiClient.isOnline();
+      // This runs before credentials are submitted. It is only a reachability
+      // check: a cached/expired token must not raise the global "session closed"
+      // dialog while the user is trying to log in again.
+      return await apiClient.isOnline({ notifyRevocation: false });
     } catch {
       return false;
     }

@@ -171,3 +171,47 @@ test('un 403 revoca la sesión cuando session-status confirma que fue cerrada', 
   assert.equal(event.reason, 'SESSION_CLOSED');
   assert.match(event.message, /otro dispositivo/);
 });
+
+test('un chequeo de conectividad previo al login no anuncia la revocación del token cacheado', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+  global.fetch = async () => ({
+    ok: false,
+    status: 401,
+    text: async () => JSON.stringify({ active: false, reason: 'NO_SESSION' }),
+  });
+
+  const client = new ApiClient();
+  client.setAuth({ token: 'token-cacheado', clientId: 1, sucursalId: 2, employeeId: 3 });
+  let emitted = false;
+  client.on('session-revoked', () => { emitted = true; });
+
+  assert.equal(await client.isOnline({ notifyRevocation: false }), true);
+  assert.equal(emitted, false);
+  assert.equal(client.lastHeartbeatAuthed, false);
+});
+
+test('un 401 tardío de la sesión anterior no revoca el token recién emitido', async (t) => {
+  const originalFetch = global.fetch;
+  t.after(() => { global.fetch = originalFetch; });
+
+  let resolveFetch;
+  global.fetch = () => new Promise((resolve) => { resolveFetch = resolve; });
+
+  const client = new ApiClient();
+  client.setAuth({ token: 'token-anterior', clientId: 1, sucursalId: 2, employeeId: 3 });
+  let emitted = false;
+  client.on('session-revoked', () => { emitted = true; });
+
+  const probe = client.isOnline();
+  client.setAuth({ token: 'token-nuevo', clientId: 1, sucursalId: 2, employeeId: 3 });
+  resolveFetch({
+    ok: false,
+    status: 401,
+    text: async () => JSON.stringify({ active: false, reason: 'SESSION_CLOSED' }),
+  });
+
+  assert.equal(await probe, true);
+  assert.equal(emitted, false);
+  assert.equal(client.token, 'token-nuevo');
+});

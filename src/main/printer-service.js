@@ -5,7 +5,7 @@ const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
-const AUTO_PRINT_MODES = new Set(['NONE', 'ARCA_ONLY', 'ALL_SALES']);
+const AUTO_PRINT_MODES = new Set(['NONE', 'ARCA_ONLY', 'SALES_ONLY', 'ALL_SALES']);
 const PAPER_FORMATS = new Set(['A4', 'TICKET_80', 'TICKET_58']);
 const MAX_PDF_BYTES = 20 * 1024 * 1024;
 const MAX_TICKET_ITEMS = 500;
@@ -140,6 +140,7 @@ function buildTicketHtml(payload, paperFormat) {
   const ticket = normalizeTicketPayload(payload);
   const pageSize = paperFormat === 'A4' ? 'A4' : paperFormat === 'TICKET_58' ? '58mm auto' : '80mm auto';
   const width = paperFormat === 'A4' ? '190mm' : paperFormat === 'TICKET_58' ? '52mm' : '72mm';
+  const padding = paperFormat === 'A4' ? '8mm' : '4mm 3mm';
   const itemRows = ticket.items.map((item) => `
     <div class="item"><div>${escapeHtml(formatAmount(item.quantity))} × ${escapeHtml(item.description)}</div><div class="amount">$ ${escapeHtml(formatAmount(item.total))}</div></div>
     <div class="unit">$ ${escapeHtml(formatAmount(item.unitPrice))} c/u</div>`).join('');
@@ -154,7 +155,7 @@ function buildTicketHtml(payload, paperFormat) {
   @page { size: ${pageSize}; margin: 0; }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; color: #000; background: #fff; font-family: Arial, sans-serif; }
-  body { width: ${width}; padding: 4mm 3mm; font-size: 11px; line-height: 1.25; }
+  body { width: ${width}; padding: ${padding}; font-size: 11px; line-height: 1.25; }
   h1 { margin: 0 0 2mm; font-size: 16px; text-align: center; }
   .center { text-align: center; }
   .muted { font-size: 10px; }
@@ -166,6 +167,7 @@ function buildTicketHtml(payload, paperFormat) {
   .total { font-size: 15px; font-weight: 700; }
 </style></head><body>
   <h1>${escapeHtml(ticket.business.name)}</h1>
+  <div class="center muted">TICKET NO FISCAL</div>
   ${ticket.business.address ? `<div class="center muted">${escapeHtml(ticket.business.address)}</div>` : ''}
   ${ticket.business.phone ? `<div class="center muted">${escapeHtml(ticket.business.phone)}</div>` : ''}
   <div class="rule"></div>
@@ -280,7 +282,7 @@ class PrinterService {
       error.code = 'INVALID_PRINTER';
       throw error;
     }
-    if (config.setupCompleted && config.autoPrintMode !== 'NONE') {
+    if (deviceName || (config.setupCompleted && config.autoPrintMode !== 'NONE')) {
       const printers = await this.listPrinters(webContents);
       if (!deviceName || !printers.some((printer) => printer.name === deviceName)) {
         const error = new Error('La impresora configurada ya no está instalada en Windows.');
@@ -305,7 +307,8 @@ class PrinterService {
       const deviceName = await this._resolveDevice(webContents, opts.deviceName);
       const tempPath = path.join(this.getTempPath(), `nuventa-print-${jobId}.pdf`);
       this.fs.writeFileSync(tempPath, buffer);
-      return this._printFile(jobId, tempPath, deviceName, true);
+      const paperFormat = PAPER_FORMATS.has(opts.paperFormat) ? opts.paperFormat : this.getConfig().paperFormat;
+      return this._printFile(jobId, tempPath, deviceName, true, paperFormat);
     });
   }
 
@@ -325,11 +328,11 @@ class PrinterService {
       const deviceName = await this._resolveDevice(webContents, opts.deviceName);
       const tempPath = path.join(this.getTempPath(), `nuventa-ticket-${jobId}.html`);
       this.fs.writeFileSync(tempPath, buildTicketHtml(normalized, paperFormat), 'utf8');
-      return this._printFile(jobId, tempPath, deviceName, false);
+      return this._printFile(jobId, tempPath, deviceName, false, paperFormat);
     });
   }
 
-  async _printFile(jobId, tempPath, deviceName, isPdf) {
+  async _printFile(jobId, tempPath, deviceName, isPdf, paperFormat = null) {
     let printWindow = null;
     try {
       printWindow = new this.BrowserWindow({
@@ -344,6 +347,15 @@ class PrinterService {
       });
       await printWindow.loadURL(pathToFileURL(tempPath).href);
       if (this.renderDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.renderDelayMs));
+      let pageSize;
+      if (!isPdf && paperFormat === 'A4') pageSize = 'A4';
+      else if (!isPdf && PAPER_FORMATS.has(paperFormat)) {
+        const heightPx = await printWindow.webContents.executeJavaScript('Math.ceil(document.body.getBoundingClientRect().height)');
+        pageSize = {
+          width: paperFormat === 'TICKET_58' ? 58000 : 80000,
+          height: Math.max(30000, Math.ceil(Number(heightPx) * 25400 / 96) + 2000),
+        };
+      }
 
       const printResult = await new Promise((resolve) => {
         let settled = false;
@@ -353,7 +365,7 @@ class PrinterService {
           clearTimeout(timeout);
           resolve(value);
         };
-        const timeout = setTimeout(() => finish({ success: false, reason: 'La impresora no respondió dentro de 30 segundos.', code: 'PRINT_TIMEOUT' }), this.timeoutMs);
+        const timeout = setTimeout(() => finish({ success: false, reason: 'Windows no confirmó el envío a tiempo. Revisá la cola antes de reimprimir; el trabajo podría seguir pendiente.', code: 'PRINT_TIMEOUT' }), this.timeoutMs);
         if (!printWindow || printWindow.isDestroyed()) {
           finish({ success: false, reason: 'La ventana de impresión se cerró.', code: 'PRINT_WINDOW_CLOSED' });
           return;
@@ -362,7 +374,8 @@ class PrinterService {
           silent: true,
           printBackground: true,
           deviceName: deviceName || undefined,
-          margins: { marginType: 'none' },
+          ...(pageSize ? { pageSize } : {}),
+          margins: { marginType: paperFormat === 'A4' ? 'default' : 'none' },
         }, (success, failureReason) => finish({ success, reason: failureReason || null, code: success ? null : 'SPOOLER_REJECTED' }));
       });
 

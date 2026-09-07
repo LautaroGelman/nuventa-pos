@@ -95,6 +95,7 @@ contextBridge.exposeInMainWorld('nuventaPrinter', {
   version: 2,
   getState: () => ipcRenderer.invoke('printer:get-state'),
   saveConfig: (config) => ipcRenderer.invoke('printer:save-config', config),
+  openSettings: () => ipcRenderer.invoke('printer:open-settings'),
   list: () => ipcRenderer.invoke('printer:list'),
   getSelected: () => ipcRenderer.invoke('printer:get-selected'),
   setSelected: (name) => ipcRenderer.invoke('printer:set-selected', name),

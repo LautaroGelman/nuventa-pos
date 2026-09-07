@@ -139,7 +139,7 @@ try {
   $publicBlockmap = Join-Path $probeDir "$versionedName.blockmap"
   $publicLatest = Join-Path $probeDir 'latest.yml'
   $publicManifest = Join-Path $probeDir 'release.json'
-  Invoke-WebRequest -Uri "$ringUrl/$versionedName?probe=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" -Headers $probeHeaders -OutFile $publicSetup -UseBasicParsing
+  Invoke-WebRequest -Uri "$ringUrl/${versionedName}?probe=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" -Headers $probeHeaders -OutFile $publicSetup -UseBasicParsing
   Invoke-WebRequest -Uri "$ringUrl/$versionedName.blockmap?probe=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" -Headers $probeHeaders -OutFile $publicBlockmap -UseBasicParsing
   Invoke-WebRequest -Uri "$ringUrl/latest.yml?probe=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" -Headers $probeHeaders -OutFile $publicLatest -UseBasicParsing
   Invoke-WebRequest -Uri "$ringUrl/release.json?probe=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" -Headers $probeHeaders -OutFile $publicManifest -UseBasicParsing
@@ -153,7 +153,7 @@ try {
   if ($Ring -eq 'pilot') {
     $anonymousProbe = Join-Path $probeDir 'anonymous-probe'
     try {
-      Invoke-WebRequest -Uri "$ringUrl/$versionedName?anonymous=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" `
+      Invoke-WebRequest -Uri "$ringUrl/${versionedName}?anonymous=$([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds())" `
         -MaximumRedirection 0 -OutFile $anonymousProbe -UseBasicParsing -ErrorAction Stop
       if ((Get-FileHash $anonymousProbe -Algorithm SHA256).Hash.ToLowerInvariant() -eq $hash) {
         throw 'Private pilot is downloadable without Cloudflare Access credentials.'

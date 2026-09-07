@@ -18,7 +18,8 @@
     "build": "npm run build:web && npm run provenance && electron-builder --win --x64",
     "build:release": "npm run build:web && npm run provenance && electron-builder --win nsis --x64 --publish never",
     "build:store": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-store.ps1",
-    "build:portable": "npm run build:web && electron-builder --win portable"
+    "build:portable": "npm run build:web && electron-builder --win portable",
+    "test:regressions": "node test/run-electron-regressions.js"
   },
   "author": "Nuventa",
   "license": "UNLICENSED",

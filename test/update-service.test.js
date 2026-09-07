@@ -42,7 +42,8 @@ test('no consulta el feed en desarrollo', async () => {
   assert.equal(updater.checks, 0);
 });
 
-test('acepta solo los feeds direct y pilot del dominio de descargas', () => {
+test('acepta los feeds direct, pilot y stable del dominio de descargas', () => {
+  assert.equal(normalizeFeedUrl('https://descargas.nuventa.com.ar/stable/'), 'https://descargas.nuventa.com.ar/stable');
   assert.equal(normalizeFeedUrl('https://descargas.nuventa.com.ar/pilot/'),
     'https://descargas.nuventa.com.ar/pilot');
   assert.equal(normalizeFeedUrl('https://evil.example/direct'),
@@ -99,7 +100,7 @@ test('solo habilita la instalación al salir después del respaldo', async () =>
   assert.deepEqual(updater.installCalls, []);
   assert.equal(service.getStatus().state, 'installing');
   assert.equal(service.installDownloadedUpdate(), true);
-  assert.deepEqual(updater.installCalls, [[true, false]]);
+  assert.deepEqual(updater.installCalls, [[true, true]]);
   assert.equal(service.installDownloadedUpdate(), false);
   service.stop();
 });

@@ -50,6 +50,13 @@ Electron corre dos clases de proceso. Este repo controla el **main** y el **prel
 
 ## 3. Ciclo de vida del arranque
 
+La instancia principal activa `powerSaveBlocker` con `prevent-display-sleep` al
+iniciar Electron y lo libera en `will-quit`. Mantiene la pantalla encendida por
+inactividad mientras Nuventa esté abierto, incluso minimizado o sin sesión de caja.
+No modifica el plan de energía de Windows: al salir vuelve a regir su tiempo
+configurado. No impide un bloqueo o suspensión solicitados manualmente.
+Referencia: [powerSaveBlocker de Electron](https://www.electronjs.org/docs/latest/api/power-save-blocker).
+
 Secuencia de `app.whenReady()` en [../src/main/index.js:594](../src/main/index.js#L594):
 
 1. **Config** — `configStore.loadConfig()`: detecta entorno por el flag `--dev`.
@@ -127,8 +134,9 @@ El comportamiento se decide por el **rol** del usuario autenticado (roles guarda
 
 Jerarquía: `PROPIETARIO > ADMINISTRADOR > MULTIFUNCION > INVENTARIO > CAJERO`.
 
-**Excepción transversal:** la búsqueda multi-sucursal (`/inventory/all-branches`,
-`/products/all-branches`) siempre va a la nube, para cualquier rol — requiere conexión.
+**Excepción transversal:** la búsqueda multi-sucursal (`GET /inventory/page`) siempre va a la
+nube, para cualquier rol — requiere conexión. El inventario de la sucursal activa
+(`GET /items/page`) continúa disponible desde SQLite.
 
 ## 7. Conectividad y offline
 

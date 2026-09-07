@@ -825,6 +825,18 @@ function runMigrations() {
   });
 
   _purgeLegacyPlaintextTokens();
+  applyMigration(13, 'snapshot_staging', () => {
+    db.run('ALTER TABLE sync_state ADD COLUMN snapshot_in_progress INTEGER NOT NULL DEFAULT 0');
+    db.run(`CREATE TABLE sync_snapshot_changes (
+      client_id INTEGER NOT NULL, sucursal_id INTEGER NOT NULL,
+      entity_type TEXT NOT NULL, entity_id INTEGER NOT NULL, change_json TEXT NOT NULL,
+      PRIMARY KEY(client_id,sucursal_id,entity_type,entity_id))`);
+    db.run(`CREATE TABLE expense_categories (
+      id INTEGER NOT NULL, client_id INTEGER NOT NULL, sucursal_id INTEGER NOT NULL,
+      name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY(client_id,sucursal_id,id))`);
+    db.run('ALTER TABLE sales ADD COLUMN local_request_hash TEXT');
+  });
 }
 
 function applyMigration(version, name, migrate) {
@@ -883,16 +895,28 @@ let _inTx = false;
 function transaction(fn) {
   if (_maintenanceLocked) throw new Error('El POS se está preparando para actualizar');
   if (_inTx) return fn();
+  // sql.js COMMIT only commits memory. Keep the previous image until the atomic
+  // encrypted file replacement succeeds, so a failed fsync cannot leave a ghost sale.
+  const previous = db.export();
+  db.run('PRAGMA foreign_keys = ON');
+  const previousSequence = Number(get('SELECT COALESCE(MAX(sequence),0) n FROM sync_outbox').n);
   _inTx = true;
   db.run('BEGIN');
   try {
     const result = fn();
+    if (result && typeof result.then === 'function') throw new Error('La transacción debe ser síncrona');
+    require('./sync-bundle-v2').freezeNewMutations(getDb(), previousSequence);
     db.run('COMMIT');
-    _inTx = false;
     _persist(true);
+    db.run('PRAGMA foreign_keys = ON');
+    _inTx = false;
     return result;
   } catch (e) {
     try { db.run('ROLLBACK'); } catch (_) { /* nothing to roll back */ }
+    const Database = db.constructor;
+    db.close();
+    db = new Database(previous);
+    db.run('PRAGMA foreign_keys = ON');
     _inTx = false;
     throw e;
   }

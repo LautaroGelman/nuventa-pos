@@ -49,6 +49,7 @@ jobs:
     env:
       NUVENTA_FRONTEND_DIR: ${{ github.workspace }}\frontend
       NUVENTA_BACKEND_DIR: ${{ github.workspace }}\backend
+      NEXT_PUBLIC_API_URL: ''
       CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
       CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
       WIN_CSC_PUBLISHER_NAME: ${{ secrets.WIN_CSC_PUBLISHER_NAME }}
@@ -109,6 +110,17 @@ jobs:
             if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "Missing release secret: $name" }
           }
 
+      - name: Verify publishing access before building or uploading
+        shell: pwsh
+        run: |
+          aws s3api head-bucket --bucket $env:R2_BUCKET --endpoint-url $env:R2_ENDPOINT_URL
+          if ($LASTEXITCODE -ne 0) { throw 'R2 bucket access failed.' }
+          if ('${{ inputs.ring }}' -ne 'pilot') {
+            $body = @{ files = @("$env:R2_PUBLIC_BASE_URL/${{ inputs.ring }}/release-access-check") } | ConvertTo-Json
+            $result = Invoke-RestMethod -Method Post -Uri "https://api.cloudflare.com/client/v4/zones/$env:CF_ZONE_ID/purge_cache" -Headers @{ Authorization = "Bearer $env:CF_API_TOKEN" } -ContentType 'application/json' -Body $body
+            if (-not $result.success) { throw 'Cloudflare cache purge access failed.' }
+          }
+
       - name: Install dependencies
         shell: pwsh
         run: |
@@ -123,6 +135,7 @@ jobs:
         shell: pwsh
         run: |
           npm run check
+          npm run test:regressions
           pnpm --dir frontend test
           pnpm --dir frontend exec tsc --noEmit
 

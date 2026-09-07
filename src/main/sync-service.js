@@ -8,13 +8,10 @@ const { apiClient } = require('./api-client');
 const imageCache = require('./image-cache');
 const { BundleSyncV2 } = require('./sync-bundle-v2');
 
-// Full cloud↔local reconciliation every hour.
-// If a sync fails (offline), a 5-minute retry fires until the
-// connection is restored, then normal hourly cadence resumes.
-const SYNC_INTERVAL_MS = 300_000; // conditional pull every 5 minutes
-const RETRY_MIN_MS = 15_000;
-const RETRY_MAX_MS = 300_000;
-const MUTATION_DEBOUNCE_MS = 5_000;
+// Hourly/manual cycles upload the outbox; a cash close requests an urgent cycle.
+// Login and branch changes may download the catalog without uploading operations.
+const SYNC_INTERVAL_MS = 60 * 60 * 1000;
+const CASH_STATE_RETRY_MS = 15 * 1000;
 const V2_REPROBE_MS = 15 * 60 * 1000;
 const BATCH_SIZE = 20;
 
@@ -83,13 +80,13 @@ class SyncService extends EventEmitter {
   constructor() {
     super();
     this._timer      = null;   // main hourly interval
-    this._retryTimer = null;   // short retry when offline
     this._running    = false;
-    this._runAgain   = false;  // branch/login changes can request one follow-up cycle
+    this._runAgain   = false;  // a manual/hourly request can queue one full follow-up cycle
+    this._refreshAgain = false;
+    this._urgentAgain = false;
+    this._cashStateTimer = null;
     this._lastOnline = null;   // last observed connectivity (real, not derived from _running)
     this._delayedInvoices = []; // facturas emitidas al subir ventas offline; solo se notifican
-    this._mutationTimer = null;
-    this._retryAttempt = 0;
     this._bundleV2Available = null;
     this._lastV2ProbeAt = 0;
     this._bundle = new BundleSyncV2(apiClient);
@@ -97,17 +94,19 @@ class SyncService extends EventEmitter {
 
   start() {
     if (this._timer) return;
-    console.log('[SYNC] Service started — bundle v2 pull every 5 minutes');
-    this._timer = setInterval(() => this._tick(), SYNC_INTERVAL_MS);
-    // First run a few seconds after startup
-    setTimeout(() => this._tick(), 3000);
+    console.log('[SYNC] Service started — automatic sync every 60 minutes; immediate cash close sync');
+    this._timer = setInterval(() => this.forceSync(), SYNC_INTERVAL_MS);
+    this._cashStateTimer = setInterval(() => this._retryPendingCashState(), CASH_STATE_RETRY_MS);
+    void this.refreshCatalog();
+    this._retryPendingCashState();
   }
 
   stop() {
     if (this._timer)      { clearInterval(this._timer);      this._timer      = null; }
-    if (this._retryTimer) { clearTimeout(this._retryTimer);  this._retryTimer = null; }
-    if (this._mutationTimer) { clearTimeout(this._mutationTimer); this._mutationTimer = null; }
+    if (this._cashStateTimer) { clearInterval(this._cashStateTimer); this._cashStateTimer = null; }
     this._runAgain = false;
+    this._refreshAgain = false;
+    this._urgentAgain = false;
     console.log('[SYNC] Service stopped');
   }
 
@@ -122,36 +121,27 @@ class SyncService extends EventEmitter {
     return !this._running;
   }
 
-  // Exponential retry with jitter: 15 seconds up to 5 minutes.
-  _scheduleRetry() {
-    if (this._retryTimer) return; // already waiting
-    const base = Math.min(RETRY_MAX_MS, RETRY_MIN_MS * (2 ** Math.min(this._retryAttempt, 5)));
-    const delay = Math.min(RETRY_MAX_MS, Math.round(base * (0.75 + Math.random() * 0.5)));
-    this._retryAttempt++;
-    console.log(`[SYNC] Retry scheduled in ${Math.round(delay / 1000)} seconds`);
-    this._retryTimer = setTimeout(() => {
-      this._retryTimer = null;
-      this._tick();
-    }, delay);
-  }
-
-  // ── Cancel any pending retry (called after a successful sync) ──
-  _cancelRetry() {
-    if (this._retryTimer) {
-      clearTimeout(this._retryTimer);
-      this._retryTimer = null;
-    }
-  }
-
   notifyLocalMutation() {
-    if (this._mutationTimer) clearTimeout(this._mutationTimer);
-    this._mutationTimer = setTimeout(() => {
-      this._mutationTimer = null;
-      this.forceSync();
-    }, MUTATION_DEBOUNCE_MS);
+    // Update the pending badge without scheduling network activity.
+    this.emit('sync-status', { online: this._lastOnline, syncing: this._running });
   }
 
-  async _tick() {
+  _hasPendingCashSession(status = 'CLOSED') {
+    if (!apiClient.token || !apiClient.clientId || !apiClient.sucursalId || !apiClient.employeeId) return false;
+    return !!getDb().get(`SELECT id FROM cash_sessions WHERE status=? AND sync_status='pending'
+      AND client_id=? AND sucursal_id=? AND employee_id=? LIMIT 1`,
+    [status, apiClient.clientId, apiClient.sucursalId, apiClient.employeeId]);
+  }
+
+  _retryPendingCashState() {
+    // Durable state survives an offline close and an application restart. Ordinary sales
+    // still wait for the hourly/manual cycle. Do not queue duplicate retries while running.
+    if (this._running) return;
+    if (this._hasPendingCashSession()) void this.forceSync({ urgent: true });
+    else if (this._hasPendingCashSession('OPEN')) void this._tick({ cashStateOnly: true, urgent: true });
+  }
+
+  async _tick({ uploadMutations = true, urgent = false, cashStateOnly = false } = {}) {
     if (this._running) return;
     this._running = true;
 
@@ -162,9 +152,12 @@ class SyncService extends EventEmitter {
 
       if (!online) {
         // Invisible to cashier — session continues from local DB.
-        // Schedule a short retry so we reconnect ASAP.
-        this._scheduleRetry();
+        // Wait for the next hourly cycle or manual request.
         this._running = false;
+        return;
+      }
+      if (require('./offline-session').isOfflineSession(apiClient.token)) {
+        this.emit('sync-status', { online: true, syncing: false, requiresOnlineLogin: true });
         return;
       }
 
@@ -177,20 +170,20 @@ class SyncService extends EventEmitter {
         return;
       }
 
-      // Online — cancel any pending retry; we're connected.
-      this._cancelRetry();
-
       // R4-#38: capturar el epoch de identidad al INICIO del ciclo. apiClient es un singleton mutable;
       // si el usuario hace logout o re-login (posiblemente como OTRO tenant/sucursal) en medio del
       // ciclo, quedaría re-apuntado y un pendiente del tenant A se subiría al branch del tenant B.
       // Abortamos el resto del ciclo en cuanto detectamos el cambio.
       const epoch = apiClient.authEpoch;
+      const syncIdentity = { clientId: Number(apiClient.clientId), sucursalId: Number(apiClient.sucursalId) };
       const stillSameAuth = () => apiClient.authEpoch === epoch;
 
       const db = getDb();
       // R4-#33: solo refrescar la ventana de gracia offline si el heartbeat fue AUTENTICADO (2xx). Un
       // 401 (token revocado / suscripción morosa / empleado dado de baja) NO debe extender los 7 días.
       if (apiClient.lastHeartbeatAuthed) {
+        db.run('UPDATE users SET last_online_at=? WHERE client_id=? AND employee_id=?',
+          [new Date().toISOString(), apiClient.clientId, apiClient.employeeId]);
         db.run(
           "INSERT OR REPLACE INTO app_config (key, value) VALUES ('last_online_at', ?)",
           [new Date().toISOString()]
@@ -216,20 +209,27 @@ class SyncService extends EventEmitter {
       if (this._bundleV2Available !== false) {
         try {
           this._delayedInvoices = [];
-          const bundle = await this._bundle.sync();
+          const bundle = await this._bundle.sync({ uploadMutations, urgent, cashStateOnly });
           this._bundleV2Available = true;
-          this._retryAttempt = 0;
           this._delayedInvoices = bundle.delayedInvoices;
-          if (bundle.changeCount > 0) this.emit('products-updated');
-          if (bundle.mutationCount > 0) {
+          if (!stillSameAuth()) return;
+          if (bundle.changeCount > 0) {
+            this.emit('products-updated', { clientId: bundle.clientId, sucursalId: bundle.sucursalId });
+            const products = db.all('SELECT id,image_url,thumbnail_url FROM products WHERE active=1');
+            imageCache.reconcileProducts(products);
+          }
+          if (bundle.mutationCount > 0 || bundle.changeCount > 0) {
             this.emit('sync-complete', {
               total: bundle.mutationCount,
               changes: bundle.changeCount,
               delayedInvoices: bundle.delayedInvoices,
+              clientId: bundle.clientId,
+              sucursalId: bundle.sucursalId,
               protocolVersion: 2,
             });
           }
           this.emit('sync-status', { online: true, syncing: false, protocolVersion: 2 });
+          // Retryable rows remain queued until the next hourly cycle or manual request.
           return;
         } catch (error) {
           if (error.status === 404 || error.status === 405) {
@@ -242,17 +242,23 @@ class SyncService extends EventEmitter {
       }
 
       // 1. Upload pending sales (local → cloud)
+      if (cashStateOnly) {
+        const total = await this._uploadPendingCashSessions({ onlyOpen: true });
+        if (total) this.emit('sync-complete', { sessions: total, total });
+        this.emit('sync-status', { online: true, syncing: false });
+        return;
+      }
       this._delayedInvoices = [];
-      const salesSynced = await this._uploadPendingSales();
+      const salesSynced = uploadMutations ? await this._uploadPendingSales() : 0;
 
       // 2. Upload pending returns (local → cloud)
-      const returnsSynced = stillSameAuth() ? await this._uploadPendingReturns() : 0;
+      const returnsSynced = uploadMutations && stillSameAuth() ? await this._uploadPendingReturns() : 0;
 
       // 3. Upload pending cash movements (local → cloud)
-      const movementsSynced = stillSameAuth() ? await this._uploadPendingCashMovements() : 0;
+      const movementsSynced = uploadMutations && stillSameAuth() ? await this._uploadPendingCashMovements() : 0;
 
       // 4. Upload pending cash sessions (local → cloud)
-      const sessionsSynced = stillSameAuth() ? await this._uploadPendingCashSessions() : 0;
+      const sessionsSynced = uploadMutations && stillSameAuth() ? await this._uploadPendingCashSessions() : 0;
 
       // 5. Download product catalog + registers (cloud → local)
       if (stillSameAuth() && apiClient.token) {
@@ -266,8 +272,9 @@ class SyncService extends EventEmitter {
       }
 
       const totalSynced = salesSynced + returnsSynced + movementsSynced + sessionsSynced;
-      if (totalSynced > 0) {
+      if (totalSynced > 0 && stillSameAuth()) {
         this.emit('sync-complete', {
+          ...syncIdentity,
           sales: salesSynced,
           returns: returnsSynced,
           movements: movementsSynced,
@@ -278,31 +285,43 @@ class SyncService extends EventEmitter {
       }
 
       this.emit('sync-status', { online: true, syncing: false });
-      this._retryAttempt = 0;
     } catch (err) {
       console.error('[SYNC] Tick error:', err.message);
       this.emit('sync-status', { online: false, syncing: false });
-      this._scheduleRetry();
     } finally {
       this._running = false;
       if (this._runAgain) {
+        const urgentAgain = this._urgentAgain;
         this._runAgain = false;
-        setTimeout(() => this._tick(), 0);
+        this._urgentAgain = false;
+        this._refreshAgain = false;
+        void this._tick({ urgent: urgentAgain });
+      } else if (this._refreshAgain) {
+        this._refreshAgain = false;
+        void this.refreshCatalog();
       }
     }
   }
 
-  async forceSync() {
-    // A cycle may already be running (hourly tick or retry). Surface that
+  async forceSync({ urgent = false } = {}) {
+    // A cycle may already be running (hourly tick or catalog refresh). Surface that
     // instead of silently doing nothing, so the "Forzar sincronización"
     // button always gives feedback.
     if (this._running) {
       this._runAgain = true;
+      this._urgentAgain = this._urgentAgain || urgent;
       this.emit('sync-status', { online: this._lastOnline, syncing: true });
       return;
     }
-    this._cancelRetry();
-    await this._tick();
+    await this._tick({ urgent });
+  }
+
+  async refreshCatalog() {
+    if (this._running) {
+      this._refreshAgain = true;
+      return;
+    }
+    await this._tick({ uploadMutations: false });
   }
 
   /**
@@ -356,6 +375,11 @@ class SyncService extends EventEmitter {
       outboxOldestAgeSeconds: outbox?.oldest_age_seconds || 0,
       outboxPayloadBytes: outbox?.bytes || 0,
       outboxQuarantined: quarantined?.cnt || 0,
+      requiresOnlineLogin: require('./offline-session').isOfflineSession(apiClient.token),
+      incidents: db.all(`SELECT sequence,mutation_type AS type,occurred_at AS occurredAt,
+        last_error AS message,warning_code AS code,state FROM sync_outbox
+        WHERE client_id=? AND sucursal_id=? AND (state='QUARANTINED' OR last_error IS NOT NULL)
+        ORDER BY sequence LIMIT 100`, [Number(apiClient.clientId || 0), Number(apiClient.sucursalId || 0)]),
       cursor: syncState?.cursor || null,
       protocolVersion: this._bundleV2Available === false ? 1 : 2,
     };
@@ -729,12 +753,12 @@ class SyncService extends EventEmitter {
 
   // ── Upload pending cash sessions ────────────────────
 
-  async _uploadPendingCashSessions() {
+  async _uploadPendingCashSessions({ onlyOpen = false } = {}) {
     const db = getDb();
     // Only sync CLOSED sessions — open sessions sync on close
     const pendingSessions = db.all(
-      "SELECT * FROM cash_sessions WHERE sync_status = 'pending' AND status = 'CLOSED' ORDER BY opening_time ASC LIMIT ?",
-      [BATCH_SIZE]
+      "SELECT * FROM cash_sessions WHERE sync_status = 'pending' AND status = ? ORDER BY opening_time ASC LIMIT ?",
+      [onlyOpen ? 'OPEN' : 'CLOSED', BATCH_SIZE]
     );
 
     if (pendingSessions.length === 0) return 0;
@@ -743,6 +767,13 @@ class SyncService extends EventEmitter {
 
     for (const sess of pendingSessions) {
       if (!this._rowMatchesCurrentAuth(sess)) continue; // R7-#55: no imputar el arqueo a otra sucursal/tenant
+      if (onlyOpen && db.get(`SELECT id FROM cash_sessions WHERE client_id=? AND sucursal_id=?
+        AND cash_register_id=? AND id<? AND sync_status!='synced' LIMIT 1`,
+      [sess.client_id, sess.sucursal_id, sess.cash_register_id, sess.id])) continue;
+      if (!onlyOpen && db.get(`SELECT 1 AS pending FROM sales WHERE cash_session_id=? AND sync_status!='synced'
+        UNION ALL SELECT 1 FROM returns WHERE cash_session_id=? AND sync_status!='synced'
+        UNION ALL SELECT 1 FROM cash_movements WHERE cash_session_id=? AND sync_status!='synced' LIMIT 1`,
+      [sess.id, sess.id, sess.id])) continue;
       try {
         // Reuse the cloud id if a previous cycle already opened the session but
         // failed before closing it. Re-opening would create a DUPLICATE orphan
@@ -766,6 +797,16 @@ class SyncService extends EventEmitter {
           }
           db.run('UPDATE cash_sessions SET cloud_id = ? WHERE id = ?', [cloudSessionId, sess.id]);
           db.save();
+        }
+
+        if (onlyOpen) {
+          db.transaction(() => {
+            // A close can arrive during the online reservation; leave its pending flag intact.
+            db.run("UPDATE cash_sessions SET sync_status=CASE WHEN status='OPEN' THEN 'synced' ELSE sync_status END WHERE id=?", [sess.id]);
+            acknowledgeLegacyOutbox(db, 'CASH_SESSION_OPEN', 'cash_sessions', sess.id);
+          });
+          synced++;
+          continue;
         }
 
         // Then close it with the recorded counts.
@@ -1073,6 +1114,7 @@ class SyncService extends EventEmitter {
 }
 
 module.exports = {
+  SYNC_INTERVAL_MS,
   SyncService,
   delayedInvoiceFromSaleResult,
   supportsBundleV2,

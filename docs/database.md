@@ -8,6 +8,15 @@
 
 ## Motor y persistencia
 
+Las operaciones de caja usan `db.transaction()`: además del commit SQLite, deben completar el
+reemplazo durable del archivo. Si falla el guardado (por ejemplo, ENOSPC), se restaura también la
+imagen anterior en memoria; reintentar no duplica una venta aceptada sólo en RAM. El payload/hash
+del outbox se congela dentro de esa misma transacción. Las funciones transaccionales son síncronas.
+
+La migración versionada 13 incorpora `sales.local_request_hash`, el staging durable
+`sync_snapshot_changes`, `sync_state.snapshot_in_progress` y el catálogo de `expense_categories`.
+No editar una migración aplicada en un despliegue; agregar una versión nueva.
+
 - **Motor:** `sql.js` — SQLite compilado a **WebAssembly**. La base es un buffer en memoria que se
   exporta a un archivo (`db.export()` → `fs.writeFileSync`).
 - **Archivo:** `<userData>/nuventa-pos.db` (en Windows ≈ `%APPDATA%/nuventa-pos/nuventa-pos.db`).

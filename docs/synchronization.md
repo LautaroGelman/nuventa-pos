@@ -20,7 +20,7 @@ igual que sus cursores.
 
 `POST /api/client-panel/{clientId}/sucursales/{sucursalId}/pos-sync/v2` recibe gzip, como máximo 50
 mutaciones y 1 MiB descomprimido. El backend procesa cada mutación en una transacción independiente
-y en orden de dependencia: apertura, venta, devolución/movimiento y cierre. Devuelve `APPLIED`,
+y en orden de secuencia del outbox (sin agrupar por tipo entre turnos). Devuelve `APPLIED`,
 `APPLIED_WITH_WARNING`, `DUPLICATE`, `RETRYABLE` o `CONFLICT` por UUID.
 
 La idempotencia se registra por cliente+sucursal+UUID+hash completo. Reenviar una respuesta perdida
@@ -28,7 +28,21 @@ no duplica venta, caja ni stock; reutilizar el UUID con otro payload queda en cu
 
 La respuesta contiene hasta 500 cambios de un change-log monotónico. Productos, cajas y configuración
 de balanza incluyen tombstones. Un cursor ausente o de más de 30 días inicia un snapshot paginado;
-los eventos ocurridos durante el snapshot se leen después de su watermark.
+los eventos ocurridos durante el snapshot se leen después de su watermark. Las páginas se guardan
+en `sync_snapshot_changes`; el catálogo activo sólo se reemplaza al completar el snapshot. El cursor
+y las páginas sobreviven a un reinicio. Un cambio de token o sucursal cancela la aplicación de una
+respuesta del ciclo anterior.
+
+Las operaciones incluyen `employeeId` y `clientSessionUuid`; una apertura posterior incluye
+`previousSessionUuid`. El servidor exige el turno exacto y conserva las fechas de apertura/cierre.
+Si entra otro empleado, las operaciones pendientes del autor anterior esperan su ingreso online
+(`ORIGINAL_ACTOR_REQUIRED`). No se atribuyen al empleado nuevo. Una dependencia fallida bloquea el
+resto de ese lote; los turnos independientes pueden continuar en un envío posterior.
+
+En backend, V11 impone una sola sesión abierta por caja y por empleado/sucursal. El secuenciador
+del change-log permanece bloqueado hasta commit: un cursor no puede adelantar un cambio todavía no
+confirmado. Esto serializa la asignación de eventos; monitorear contención al probar carga real.
+Los cursores anteriores al formato 2 provocan un snapshot de reparación.
 
 Cada producto incluye revisión y prueba HMAC de precio. Un precio histórico con prueba válida se
 conserva; una prueba inválida conserva la venta pero genera un incidente. Dos cajas pueden agotar la
@@ -37,10 +51,33 @@ conserva; una prueba inválida conserva la venta pero genera un incidente. Dos c
 
 ## Cadencia y diagnóstico
 
-- Operación local: debounce de 5 segundos.
-- Reconexión: reintento con jitter exponencial entre 15 segundos y 5 minutos.
-- Pull condicional: cada 5 minutos.
-- Cierre: no inicia red; sólo deja terminar hasta 3 segundos un ciclo existente.
+- Ventas, devoluciones y movimientos: guardado durable y actualización del contador, sin envío inmediato.
+- Sincronización completa automática: cada 60 minutos; el botón manual puede adelantarla.
+- Cerrar una caja dispara inmediatamente un ciclo completo después de persistir el cierre. También
+  lo hace el reintento idempotente del cierre. Si hay otro ciclo en vuelo, queda un ciclo urgente
+  encolado sin perder esa prioridad ante posteriores pedidos manuales o descargas de catálogo.
+- El ciclo urgente v2 ignora `next_retry_at` de la cola inicial y supera el presupuesto ordinario
+  de 20 lotes. Mantiene el orden, las dependencias, los límites de 50 operaciones/1 MiB por pedido
+  y la cuarentena. Cada operación se intenta una sola vez por ciclo; los errores no generan un bucle.
+- Cada 15 segundos se revisan aperturas/cierres pendientes del empleado, cliente y sucursal activos.
+  Un cierre pendiente reintenta el ciclo urgente, incluso después de reiniciar e ingresar. Una
+  apertura pendiente se publica sin enviar ventas ni movimientos. En v2 respeta el cierre previo.
+- Inicio de sesión y selección de sucursal descargan catálogo sin mutaciones; las cajas pendientes
+  tienen el tratamiento separado anterior. Las ventas solas conservan la cadencia horaria/manual.
+- Sin cierres pendientes, los errores esperan al ciclo horario/manual. En ciclos ordinarios se
+  conservan el máximo de 20 lotes y el backoff de cada operación.
+- El fallback v1 conserva lotes de 20 filas y reintenta las cajas pendientes cada 15 segundos;
+  no cierra una sesión que tenga ventas, devoluciones o movimientos sin confirmar.
+- Una operación nueva demasiado grande se rechaza dentro de la transacción; una antigua se aísla
+  para revisión sin impedir el envío de otras operaciones independientes.
+- Cerrar la aplicación no inicia red: sólo deja terminar hasta 3 segundos un ciclo existente.
+
+La interfaz cuenta el outbox completo, muestra incidentes y avisa cuando hace falta ingresar online.
+Un cambio de catálogo sin ventas pendientes también invalida las consultas de productos del renderer.
+
+La cadencia se cambió por pedido explícito durante el testing del 7/9/2026. No afecta las consultas
+online de disponibilidad de cajas o inventario multi-sucursal, ni los cobros integrados que necesitan
+una operación remota. El cierre de la app no inicia una sincronización nueva.
 
 El reporte exportable contiene versión, canal, estado/progreso del actualizador, códigos de error,
 cursor opaco y cantidad/tamaño/antigüedad del outbox. Nunca incluye JWT, credenciales ni payloads.

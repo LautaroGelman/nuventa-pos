@@ -33,6 +33,7 @@ function createHarness(options = {}) {
     constructor() {
       this.destroyed = false;
       this.webContents = {
+        executeJavaScript: async () => 480,
         print: (_opts, callback) => {
           printCalls.push(_opts);
           active += 1;
@@ -101,6 +102,13 @@ test('requires printer and paper for a completed automatic setup', () => {
     selectedPrinter: null,
     paperFormat: null,
   }), /Elegí una impresora/);
+});
+
+test('persists tickets-only without enabling automatic ARCA', () => {
+  const h = createHarness();
+  const config = { setupCompleted: true, autoPrintMode: 'SALES_ONLY', selectedPrinter: 'Thermal', paperFormat: 'TICKET_80' };
+  h.service.saveConfig(config);
+  assert.deepEqual(h.service.getConfig(), config);
 });
 
 test('serializes print jobs and reports them as spooled', async () => {
@@ -185,4 +193,30 @@ test('prints a structured ticket using the configured paper', async () => {
   const result = await h.service.printTicket(h.sender, ticket(), { automatic: true });
   assert.equal(result.state, 'SPOOLED');
   assert.equal(h.printCalls[0].deviceName, 'Thermal');
+  assert.deepEqual(h.printCalls[0].pageSize, { width: 80000, height: 129000 });
+});
+
+test('test ticket honors the draft printer and A4 paper without saving configuration', async () => {
+  const h = createHarness();
+  const result = await h.service.printTicket(h.sender, ticket(), { deviceName: 'Thermal', paperFormat: 'A4' });
+  assert.equal(result.state, 'SPOOLED');
+  assert.equal(h.printCalls[0].pageSize, 'A4');
+  assert.equal(h.printCalls[0].margins.marginType, 'default');
+  assert.match(buildTicketHtml(ticket(), 'A4'), /padding: 8mm/);
+  assert.equal(h.store.get('printerConfig'), undefined);
+});
+
+test('an explicitly selected missing printer never falls back to the Windows default', async () => {
+  const h = createHarness();
+  const result = await h.service.printTicket(h.sender, ticket(), { deviceName: 'Removed', paperFormat: 'A4' });
+  assert.equal(result.success, false);
+  assert.equal(result.errorCode, 'PRINTER_MISSING');
+  assert.equal(h.printCalls.length, 0);
+});
+
+test('A4 PDFs respect the driver printable margins and thermal PDFs keep roll margins', async () => {
+  const h=createHarness();
+  await h.service.printPdf(h.sender,PDF,{deviceName:'Thermal',paperFormat:'A4'});
+  await h.service.printPdf(h.sender,PDF,{deviceName:'Thermal',paperFormat:'TICKET_58'});
+  assert.deepEqual(h.printCalls.map(call=>call.margins.marginType),['default','none']);
 });

@@ -98,12 +98,15 @@ function returnPayload(db, outbox, clientId, sucursalId) {
   const items = db.all('SELECT * FROM return_items WHERE return_local_id=? ORDER BY id', [ret.local_id]);
   return {
     saleId: ret.sale_cloud_id || sale?.cloud_id || undefined,
+    employeeId: ret.employee_id,
+    clientSessionUuid: db.get('SELECT client_session_uuid FROM cash_sessions WHERE id=?', [ret.cash_session_id])?.client_session_uuid,
     clientSaleUuid: sale?.client_sale_uuid || undefined,
     reason: ret.reason || 'Devolución desde POS',
     refundMethod: ret.refund_method || 'CASH',
     returnDate: localDateTime(ret.return_date),
     items: items.map((item) => ({
-      saleItemId: item.sale_item_id || undefined,
+      // Local line IDs are not remote IDs. Resolve by product after the sale ACK.
+      saleItemId: ret.sale_local_id ? undefined : item.sale_item_id || undefined,
       productId: item.product_id || undefined,
       quantity: Number(item.quantity),
     })),
@@ -115,6 +118,8 @@ function movementPayload(db, outbox, clientId, sucursalId) {
   if (!movement || !rowBelongsToScope(movement, clientId, sucursalId)) return null;
   return {
     scope: movement.scope || 'SESSION',
+    employeeId: movement.employee_id,
+    clientSessionUuid: db.get('SELECT client_session_uuid FROM cash_sessions WHERE id=?', [movement.cash_session_id])?.client_session_uuid,
     type: movement.type,
     amount: Number(movement.amount),
     note: movement.description || undefined,
@@ -128,6 +133,10 @@ function sessionPayload(db, outbox, clientId, sucursalId) {
   if (!session || !rowBelongsToScope(session, clientId, sucursalId)) return null;
   if (outbox.mutation_type === 'CASH_SESSION_OPEN') {
     return {
+      employeeId: session.employee_id,
+      previousSessionUuid: db.get(`SELECT client_session_uuid FROM cash_sessions
+        WHERE client_id=? AND sucursal_id=? AND cash_register_id=? AND id<?
+        ORDER BY id DESC LIMIT 1`, [clientId, sucursalId, session.cash_register_id, session.id])?.client_session_uuid || undefined,
       cashRegisterId: Number(session.cash_register_id),
       initialAmount: Number(session.initial_amount || 0),
       openedAt: localDateTime(session.opening_time),
@@ -135,6 +144,7 @@ function sessionPayload(db, outbox, clientId, sucursalId) {
   }
   return {
     clientSessionUuid: session.client_session_uuid,
+    employeeId: session.employee_id,
     countedAmount: Number(session.counted_amount || 0),
     floatLeftForNext: Number(session.float_left_for_next || 0),
     note: session.closing_note || 'Sincronizado desde POS offline',
@@ -164,18 +174,48 @@ function materialize(db, outbox, clientId, sucursalId) {
   return { payload: JSON.parse(json), hash };
 }
 
-function dueMutations(db, clientId, sucursalId, baseRequest) {
+function freezeNewMutations(db, previousSequence) {
+  for (const row of db.all('SELECT * FROM sync_outbox WHERE sequence>? AND payload_json IS NULL', [previousSequence])) {
+    const frozen = materialize(db, row, row.client_id, row.sucursal_id);
+    if (!frozen) throw new Error('No se pudo preparar la operación para sincronizar');
+    if (Buffer.byteLength(JSON.stringify({ mutations: [{ payload: frozen.payload }] })) > MAX_REQUEST_BYTES - 8192) {
+      throw new Error('La operación supera el tamaño permitido para sincronizar. Reducí la cantidad de líneas.');
+    }
+  }
+}
+
+function quarantine(db, row, message, code) {
+  db.run("UPDATE sync_outbox SET state='QUARANTINED',last_error=?,warning_code=? WHERE sequence=?",
+    [message, code, row.sequence]);
+  const targets = { sales: 'local_id', returns: 'local_id', cash_movements: 'local_id', cash_sessions: 'id' };
+  if (targets[row.source_table]) db.run(`UPDATE ${row.source_table} SET sync_status='needs_review',sync_error=? WHERE ${targets[row.source_table]}=?`,
+    [message, row.source_id]);
+}
+
+function dueMutations(db, clientId, sucursalId, baseRequest, urgentBatch = null) {
   db.run(`UPDATE sync_outbox SET state='PENDING',updated_at=datetime('now')
            WHERE state='IN_FLIGHT' AND updated_at < datetime('now','-10 minutes')`);
   const rows = db.all(`SELECT * FROM sync_outbox
-     WHERE state='PENDING' AND (next_retry_at IS NULL OR next_retry_at<=datetime('now'))
+     WHERE state IN ('PENDING','QUARANTINED','IN_FLIGHT')
        AND (client_id IS NULL OR client_id=?) AND (sucursal_id IS NULL OR sucursal_id=?)
-     ORDER BY sequence LIMIT 100`, [clientId, sucursalId]);
+     ORDER BY sequence`, [clientId, sucursalId]);
   const mutations = [];
   const selected = [];
+  const blockedSessions = new Set();
   for (const row of rows) {
+    if (urgentBatch && Number(row.sequence) > urgentBatch.maxSequence) continue;
     const frozen = materialize(db, row, clientId, sucursalId);
     if (!frozen) continue;
+    const sessionKey = row.mutation_type === 'CASH_SESSION_OPEN'
+      ? row.idempotency_key : frozen.payload.clientSessionUuid;
+    const retryAt = row.next_retry_at ? Date.parse(row.next_retry_at.replace(' ', 'T') + 'Z') : 0;
+    if (row.state !== 'PENDING' || (!urgentBatch && retryAt > Date.now())
+        || urgentBatch?.attempted.has(Number(row.sequence))
+        || (urgentBatch?.cashStateOnly && row.mutation_type !== 'CASH_SESSION_OPEN') || blockedSessions.has(sessionKey)
+        || blockedSessions.has(frozen.payload.previousSessionUuid)) {
+      if (sessionKey) blockedSessions.add(sessionKey);
+      continue;
+    }
     const mutation = {
       sequence: Number(row.sequence),
       type: row.mutation_type,
@@ -185,6 +225,11 @@ function dueMutations(db, clientId, sucursalId, baseRequest) {
       payloadHash: frozen.hash,
     };
     const candidate = { ...baseRequest, mutations: [...mutations, mutation] };
+    if (Buffer.byteLength(JSON.stringify({ ...baseRequest, mutations: [mutation] })) > MAX_REQUEST_BYTES) {
+      quarantine(db, row, 'La operación supera el límite del servidor y requiere revisión.', 'PAYLOAD_TOO_LARGE');
+      if (sessionKey) blockedSessions.add(sessionKey);
+      continue;
+    }
     if (Buffer.byteLength(JSON.stringify(candidate)) > MAX_REQUEST_BYTES) break;
     mutations.push(mutation);
     selected.push(Number(row.sequence));
@@ -219,8 +264,9 @@ function applyProduct(db, change, now, clientId, sucursalId) {
   }
   const product = change.payload;
   const cloudQuantity = Number(product.cloudQuantity ?? product.quantity ?? 0);
+  const tracksStock = !product.noCode && !product.weighable && product.stockTracked !== false;
   const effectiveQuantity = cloudQuantity
-    + pendingStockDelta(db, Number(product.id), clientId, sucursalId);
+    + (tracksStock ? pendingStockDelta(db, Number(product.id), clientId, sucursalId) : 0);
   db.run(`INSERT INTO products
     (id,code,no_code,stock_tracked,weighable,max_unit_price,name,description,price,cost,
      cost_derived,quantity,cloud_quantity,catalog_revision,price_proof,low_stock_threshold,
@@ -364,15 +410,37 @@ function applyResponse(db, response, clientId, sucursalId) {
     }
 
     if (response.resetRequired) {
+      db.run('DELETE FROM sync_snapshot_changes WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
+      db.run('UPDATE sync_state SET snapshot_in_progress=1 WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
+    }
+    const snapshot = db.get('SELECT snapshot_in_progress FROM sync_state WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId])?.snapshot_in_progress;
+    let changes = response.changes || [];
+    if (snapshot) {
+      for (const change of changes) db.run(`INSERT OR REPLACE INTO sync_snapshot_changes
+        (client_id,sucursal_id,entity_type,entity_id,change_json) VALUES (?,?,?,?,?)`,
+      [clientId, sucursalId, change.entityType, change.entityId, JSON.stringify(change)]);
+      changes = [];
+    }
+    if (snapshot && !response.hasMore) {
+      changes = db.all('SELECT change_json FROM sync_snapshot_changes WHERE client_id=? AND sucursal_id=?',
+        [clientId, sucursalId]).map((row) => JSON.parse(row.change_json));
       db.run('UPDATE products SET active=0 WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
       db.run('UPDATE cash_registers SET active=0 WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
+      db.run('UPDATE expense_categories SET active=0 WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
+      db.run('DELETE FROM sync_snapshot_changes WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
+      db.run('UPDATE sync_state SET snapshot_in_progress=0 WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
     }
-    for (const change of response.changes || []) {
+    for (const change of changes) {
       if (change.entityType === 'PRODUCT') applyProduct(db, change, now, clientId, sucursalId);
       else if (change.entityType === 'REGISTER') applyRegister(db, change, now, clientId, sucursalId);
       else if (change.entityType === 'SCALE_SETTINGS' && change.payload) {
-        db.run("INSERT OR REPLACE INTO app_config(key,value) VALUES ('scale_settings',?)",
-          [JSON.stringify(change.payload)]);
+        db.run('INSERT OR REPLACE INTO app_config(key,value) VALUES (?,?)',
+          [`scale_settings:${clientId}:${sucursalId}`, JSON.stringify(change.payload)]);
+      } else if (change.entityType === 'EXPENSE_CATEGORIES' && change.payload) {
+        db.run('UPDATE expense_categories SET active=0 WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
+        for (const category of change.payload) db.run(`INSERT OR REPLACE INTO expense_categories
+          (id,client_id,sucursal_id,name,active) VALUES (?,?,?,?,?)`,
+        [category.id, clientId, sucursalId, category.name, category.active === false ? 0 : 1]);
       }
     }
     db.run(`UPDATE sync_state SET cursor=?,last_success_at=?,last_error=NULL
@@ -388,25 +456,45 @@ class BundleSyncV2 {
     this.apiClient = apiClient;
   }
 
-  async sync() {
+  async sync({ uploadMutations = true, urgent = false, cashStateOnly = false } = {}) {
     const db = getDb();
     const clientId = Number(this.apiClient.clientId);
     const sucursalId = Number(this.apiClient.sucursalId);
+    const token = this.apiClient.token;
+    const epoch = this.apiClient.authEpoch;
+    const assertIdentity = () => {
+      if (epoch !== this.apiClient.authEpoch || token !== this.apiClient.token
+          || clientId !== Number(this.apiClient.clientId) || sucursalId !== Number(this.apiClient.sucursalId)) {
+        const error = new Error('La identidad cambió durante la sincronización');
+        error.code = 'SYNC_IDENTITY_CHANGED';
+        throw error;
+      }
+    };
     const state = getSyncState(db, clientId, sucursalId);
     let cursor = state.cursor || null;
     let mutationCount = 0;
     let changeCount = 0;
     let delayedInvoices = [];
+    let catalogHasMore = false;
+    let lastBatchSize = 0;
+    const pending = (urgent || cashStateOnly) && uploadMutations ? db.get(`SELECT MAX(sequence) max_sequence, COUNT(*) count
+      FROM sync_outbox WHERE (client_id IS NULL OR client_id=?) AND (sucursal_id IS NULL OR sucursal_id=?)`, [clientId, sucursalId]) : null;
+    const urgentBatch = pending ? { maxSequence: Number(pending.max_sequence || 0), attempted: new Set(), cashStateOnly } : null;
+    // A close drains the original queue, even beyond 20 batches. Each row is attempted only
+    // once per cycle, so a retryable error cannot cause an unbounded busy loop.
+    const maxPages = MAX_PAGES_PER_CYCLE + Number(pending?.count || 0);
 
-    for (let page = 0; page < MAX_PAGES_PER_CYCLE; page++) {
+    for (let page = 0; page < maxPages; page++) {
+      assertIdentity();
       const base = {
         protocolVersion: 2,
         deviceId: state.device_id,
         requestId: crypto.randomUUID(),
         cursor,
       };
-      const batch = page === 0 ? dueMutations(db, clientId, sucursalId, base)
-        : { mutations: [], selected: [] };
+      const batch = uploadMutations ? dueMutations(db, clientId, sucursalId, base, urgentBatch) : { mutations: [], selected: [] };
+      for (const sequence of batch.selected) urgentBatch?.attempted.add(sequence);
+      lastBatchSize = batch.mutations.length;
       if (batch.selected.length) {
         db.transaction(() => {
           for (const sequence of batch.selected) {
@@ -419,6 +507,7 @@ class BundleSyncV2 {
       let response;
       try {
         response = await this.apiClient.syncBundle({ ...base, mutations: batch.mutations });
+        assertIdentity();
       } catch (error) {
         if (batch.selected.length) {
           db.transaction(() => {
@@ -433,14 +522,26 @@ class BundleSyncV2 {
         }
         throw error;
       }
+      // An omitted result is not an ACK. Return it to the durable retry queue.
+      const returnedKeys = new Set((response.results || []).map((r) => r.idempotencyKey));
+      response.results = [...(response.results || []), ...batch.mutations
+        .filter((m) => !returnedKeys.has(m.idempotencyKey))
+        .map((m) => ({ idempotencyKey: m.idempotencyKey, status: 'RETRYABLE', errorCode: 'ACK_MISSING' }))];
       delayedInvoices = delayedInvoices.concat(applyResponse(db, response, clientId, sucursalId));
       mutationCount += (response.results || []).filter((r) =>
         ['APPLIED', 'APPLIED_WITH_WARNING', 'DUPLICATE'].includes(r.status)).length;
       changeCount += (response.changes || []).length;
       cursor = response.nextCursor || cursor;
-      if (!response.hasMore) break;
+      catalogHasMore = !!response.hasMore;
+      if (!catalogHasMore && !batch.mutations.length) break;
+      if (!catalogHasMore && !dueMutations(db, clientId, sucursalId, base, urgentBatch).mutations.length) break;
     }
-    return { mutationCount, changeCount, delayedInvoices };
+    const next = db.get(`SELECT COUNT(*) n,
+      MIN(CASE WHEN next_retry_at IS NULL THEN datetime('now','+1 seconds') ELSE next_retry_at END) retry_at
+      FROM sync_outbox WHERE state='PENDING' AND client_id=? AND sucursal_id=?`, [clientId, sucursalId]);
+    const retryDelayMs = catalogHasMore ? 1000 : next?.n
+      ? Math.max(lastBatchSize ? 1000 : 30000, Math.min(300000, Date.parse(next.retry_at.replace(' ', 'T') + 'Z') - Date.now())) : null;
+    return { mutationCount, changeCount, delayedInvoices, retryDelayMs, clientId, sucursalId };
   }
 }
 
@@ -451,4 +552,5 @@ module.exports = {
   retryDelaySeconds,
   MAX_MUTATIONS,
   MAX_REQUEST_BYTES,
+  freezeNewMutations,
 };

@@ -27,7 +27,7 @@ function normalizeFeedUrl(value) {
     const url = new URL(value || DEFAULT_FEED_URL);
     const allowedPath = url.pathname.replace(/\/+$/, '');
     if (url.protocol !== 'https:' || url.hostname !== 'descargas.nuventa.com.ar'
-        || !['/direct', '/pilot'].includes(allowedPath)
+        || !['/direct', '/pilot', '/stable'].includes(allowedPath)
         || url.username || url.password || url.search || url.hash) return DEFAULT_FEED_URL;
     return `${url.origin}${allowedPath}`;
   } catch { return DEFAULT_FEED_URL; }
@@ -85,7 +85,7 @@ class UpdateService extends EventEmitter {
     this._status = {
       state: 'idle', currentVersion: app.getVersion(), availableVersion: null,
       percent: null, error: null, errorCode: null, attempts: 0, lastCheckAt: null,
-      channel: this.feedUrl.endsWith('/pilot') ? 'pilot' : 'direct', feedUrl: this.feedUrl,
+      channel: new URL(this.feedUrl).pathname.slice(1), feedUrl: this.feedUrl,
     };
     this._restoreDiagnostics();
   }
@@ -198,8 +198,10 @@ class UpdateService extends EventEmitter {
     if (!this._downloadedVersion || !this._installationPrepared) return false;
     this._installationPrepared = false;
     try {
-      this.autoUpdater.quitAndInstall(true, false);
-      return true;
+      this.autoUpdater.quitAndInstall(true, true);
+      // electron-updater reports an install failure through `error` and returns
+      // void. A lack of exception is not confirmation that installation started.
+      return this._status.state === 'installing';
     } catch (error) {
       this._setStatus({
         state: 'recoverable-error', error: safeError(error), errorCode: error?.code || 'INSTALL_LAUNCH_FAILED',

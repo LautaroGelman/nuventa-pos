@@ -8,7 +8,86 @@ const {
   supportsBundleV2,
   acknowledgeLegacyOutbox,
   quarantineLegacyOutbox,
+  SYNC_INTERVAL_MS,
 } = require('../src/main/sync-service');
+
+test('un cierre dispara un ciclo urgente sin esperar la hora', async () => {
+  const service = new SyncService();
+  const cycles = [];
+  service._tick = async (options) => cycles.push(options);
+  await service.forceSync({ urgent: true });
+  assert.deepEqual(cycles, [{ urgent: true }]);
+});
+
+test('un cierre durante otro ciclo conserva prioridad aunque llegue un pedido manual después', async () => {
+  const { apiClient } = require('../src/main/api-client');
+  const originalOnline = apiClient.isOnline;
+  const service = new SyncService();
+  let finish;
+  apiClient.isOnline = () => new Promise((resolve) => { finish = resolve; });
+  try {
+    const current = service.refreshCatalog();
+    await service.forceSync({ urgent: true });
+    await service.forceSync();
+    const cycles = [];
+    service._tick = async (options) => cycles.push(options);
+    finish(false);
+    await current;
+    assert.deepEqual(cycles, [{ urgent: true }]);
+    assert.equal(service._urgentAgain, false);
+  } finally { apiClient.isOnline = originalOnline; service.stop(); }
+});
+
+test('reintenta cajas pendientes cada 15 segundos y stop cancela el reintento', (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+  const service = new SyncService();
+  let pending = false;
+  const cycles = [];
+  service._hasPendingCashSession = (status = 'CLOSED') => pending && status === 'CLOSED';
+  service._tick = async (options) => cycles.push(options);
+  service.start();
+  pending = true;
+  t.mock.timers.tick(15_000);
+  assert.deepEqual(cycles, [{ uploadMutations: false }, { urgent: true }]);
+  service.stop();
+  t.mock.timers.tick(15_000);
+  assert.equal(cycles.length, 2);
+});
+
+test('las operaciones esperan una hora; inicio sólo descarga catálogo y el botón puede enviar antes', async (t) => {
+  t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+  const service = new SyncService();
+  const uploads = [];
+  service._tick = async ({ uploadMutations = true } = {}) => { uploads.push(uploadMutations); };
+  try {
+    service.start();
+    assert.equal(SYNC_INTERVAL_MS, 3600000);
+    assert.deepEqual(uploads, [false]);
+    for (let i = 0; i < 5; i++) service.notifyLocalMutation();
+    t.mock.timers.tick(3599999);
+    assert.deepEqual(uploads, [false]);
+    t.mock.timers.tick(1);
+    assert.deepEqual(uploads, [false, true]);
+    await service.forceSync();
+    assert.deepEqual(uploads, [false, true, true]);
+    service.stop();
+    t.mock.timers.tick(3600000);
+    assert.equal(uploads.length, 3);
+  } finally {
+    service.stop();
+    t.mock.timers.reset();
+  }
+});
+
+test('cambiar sucursal durante un ciclo sólo solicita descargar catálogo después', () => {
+  const service = new SyncService();
+  service._running = true;
+  service.refreshCatalog();
+  assert.equal(service._refreshAgain, true);
+  assert.equal(service._runAgain, false);
+  service.stop();
+  assert.equal(service._refreshAgain, false);
+});
 
 test('al cerrar sólo espera el ciclo en vuelo y no inicia red nueva', async () => {
   const service = new SyncService();

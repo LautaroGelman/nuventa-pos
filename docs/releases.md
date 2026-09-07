@@ -49,6 +49,13 @@ inventa un enlace alternativo.
 
 ## Recuperación
 
+En instalaciones directas empaquetadas, la búsqueda empieza 30 segundos después
+del arranque y se repite cada 6 horas. Los avisos de conexión del servicio de sync
+también pueden dispararla, con separación mínima de 5 minutos. La descarga es
+automática en segundo plano; instalar requiere **Reiniciar y actualizar** en el
+aviso del frontend. **Más tarde** permite continuar. El cierre normal no instala
+ni espera descargas (`autoInstallOnAppQuit=false`). En desarrollo está desactivado.
+
 Antes de `quitAndInstall`, el POS bloquea operaciones nuevas, drena hasta tres segundos la petición
 en curso, ejecuta `PRAGMA integrity_check` y crea un backup verificado. Un fallo cancela la
 instalación y vuelve a habilitar el POS. Un rollback se publica siempre con una versión superior.

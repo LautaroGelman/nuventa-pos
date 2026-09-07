@@ -37,12 +37,32 @@ async function waitIdle(cache) {
 }
 
 async function run() {
-  const sourceServer = http.createServer((_req, res) => {
+  let proxiedInventoryRequest = null;
+  const sourceServer = http.createServer((req, res) => {
+    if (req.url.startsWith('/api/client-panel/1/inventory/page')) {
+      proxiedInventoryRequest = {
+        method: req.method,
+        url: req.url,
+        authorization: req.headers.authorization,
+      };
+      const payload = JSON.stringify({
+        content: [],
+        page: 0,
+        size: 20,
+        totalElements: 23,
+        totalPages: 2,
+        hasNext: true,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) });
+      res.end(payload);
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': JPEG.length });
     res.end(JPEG);
   });
   await listen(sourceServer);
-  const sourceUrl = `http://127.0.0.1:${sourceServer.address().port}/product.jpg`;
+  const sourceBaseUrl = `http://127.0.0.1:${sourceServer.address().port}`;
+  const sourceUrl = `${sourceBaseUrl}/product.jpg`;
   const options = { allowHttp: true, minFreeDiskBytes: 0, manifestFlushMs: 5 };
   const dependencies = { getUserDataPath: () => smokeUserData };
   let restarted = null;
@@ -52,6 +72,7 @@ async function run() {
   try {
     const { initDatabase, getDb, closeDatabase } = require('../src/main/database');
     const { startLocalServer, stopLocalServer } = require('../src/main/local-server');
+    const { apiClient } = require('../src/main/api-client');
     await initDatabase();
     databaseStarted = true;
     const db = getDb();
@@ -101,10 +122,57 @@ async function run() {
     assert.equal(localBranches.status, 200);
     assert.deepEqual(await localBranches.json(), [{
       id: 1,
-      name: 'Sucursal #1',
+      name: '',
       active: true,
       clientId: 1,
     }]);
+
+    // Nombre real para empleados, persistente offline y separado por cliente/sucursal.
+    const savedBranchApi = { getSucursales: apiClient.getSucursales, isOnline: apiClient.isOnline,
+      token: apiClient.token, clientId: apiClient.clientId, sucursalId: apiClient.sucursalId,
+      lastHeartbeatAuthed: apiClient.lastHeartbeatAuthed };
+    Object.assign(apiClient, { token: 'smoke-token', clientId: 1, sucursalId: 1,
+      lastHeartbeatAuthed: true, isOnline: async () => true,
+      getSucursales: async () => [{ id: 1, clientId: 2, name: 'Otro cliente' },
+        { id: 2, name: 'Otra sucursal' }, { id: 1, name: 'Casa Central', active: true }] });
+    const branchEndpoint = `http://127.0.0.1:${localPort}/api/client-panel/1/sucursales`;
+    assert.equal((await (await fetch(branchEndpoint)).json())[0].name, 'Casa Central');
+    apiClient.isOnline = async () => false;
+    closeDatabase(); await initDatabase();
+    for (const role of ['ROLE_CAJERO', 'ROLE_ADMINISTRADOR']) {
+      db.run("UPDATE app_config SET value=? WHERE key='roles'", [JSON.stringify([role])]);
+      const offlineBranches = await fetch(branchEndpoint);
+      assert.equal(offlineBranches.status, 200);
+      assert.deepEqual(await offlineBranches.json(), [{ id: 1, name: 'Casa Central', active: true, clientId: 1 }]);
+    }
+    db.run("UPDATE app_config SET value='2' WHERE key='sucursal_id'");
+    assert.equal((await (await fetch(branchEndpoint)).json())[0].name, '');
+    db.run("UPDATE app_config SET value='1' WHERE key='sucursal_id'");
+    db.run("UPDATE app_config SET value='2' WHERE key='client_id'");
+    assert.equal((await fetch(branchEndpoint)).status, 403);
+    assert.equal((await (await fetch(`http://127.0.0.1:${localPort}/api/client-panel/2/sucursales`)).json())[0].name, '');
+    db.run("UPDATE app_config SET value='1' WHERE key='client_id'");
+    db.run("UPDATE app_config SET value='[\"ROLE_CAJERO\"]' WHERE key='roles'");
+    Object.assign(apiClient, savedBranchApi);
+
+    // El inventario consolidado nunca debe resolverse desde SQLite: incluso para un cajero,
+    // /inventory/page conserva la query y el token al proxearla al backend remoto.
+    const originalBaseUrl = apiClient.baseUrl;
+    apiClient.setBaseUrl(sourceBaseUrl);
+    try {
+      const globalInventory = await fetch(
+        `http://127.0.0.1:${localPort}/api/client-panel/1/inventory/page?page=0&size=20&q=azucar`
+      );
+      assert.equal(globalInventory.status, 200);
+      assert.equal((await globalInventory.json()).totalElements, 23);
+      assert.deepEqual(proxiedInventoryRequest, {
+        method: 'GET',
+        url: '/api/client-panel/1/inventory/page?page=0&size=20&q=azucar',
+        authorization: 'Bearer smoke-token',
+      });
+    } finally {
+      apiClient.setBaseUrl(originalBaseUrl);
+    }
 
     const crossTenantPage = await fetch(
       `http://127.0.0.1:${localPort}/api/client-panel/2/sucursales/1/items/page`
@@ -129,7 +197,6 @@ async function run() {
 
     // Regresión: si la nube informa que la caja está ocupada por otro usuario, el POS no debe
     // crear una sesión local que luego permita vender y termine en conflicto al sincronizar.
-    const { apiClient } = require('../src/main/api-client');
     const originalOnline = apiClient.isOnline;
     const originalGetCurrentSession = apiClient.getCurrentSession;
     const originalOpenSession = apiClient.openSession;
@@ -156,10 +223,14 @@ async function run() {
 
     const reconciledCurrent = await fetch(`${branchUrl}/cash-sessions/current`);
     assert.equal(reconciledCurrent.status, 200);
-    assert.equal(await reconciledCurrent.json(), null);
-    const quarantined = db.get("SELECT status, sync_status FROM cash_sessions WHERE client_session_uuid = 'stale-session-smoke'");
-    assert.equal(quarantined.status, 'FORCED_CLOSE');
-    assert.equal(quarantined.sync_status, 'needs_review');
+    assert.equal((await reconciledCurrent.json()).status, 'OPEN');
+    // La consulta conserva una apertura pendiente. Sólo el uploader puede enviarla,
+    // respetando fecha y dependencias; un GET no reserva una nueva caja remota.
+    const pending = db.get("SELECT status, sync_status FROM cash_sessions WHERE client_session_uuid = 'stale-session-smoke'");
+    assert.equal(pending.status, 'OPEN');
+    assert.equal(pending.sync_status, 'pending');
+    db.run("UPDATE cash_sessions SET status='CLOSED' WHERE client_session_uuid='stale-session-smoke'");
+    db.run("DELETE FROM sync_outbox WHERE source_table='cash_sessions'");
 
     // Regresión: otro cajero puede dejar una fila OPEN local aunque cloud ya haya cerrado ese turno
     // (por ejemplo, si se cerró desde el navegador). Un rechazo cloud debe conservarla; una apertura
@@ -228,6 +299,19 @@ async function run() {
     assert.equal(db.get('SELECT quantity FROM products WHERE id = 701').quantity, 4);
     const scopedSaleMutation = db.get("SELECT client_id,sucursal_id,state FROM sync_outbox WHERE mutation_type='SALE'");
     assert.deepEqual(scopedSaleMutation, { client_id: 1, sucursal_id: 1, state: 'PENDING' });
+
+    // El DTO público usa cloud_id. Durante una reconciliación puede quedar una fila histórica
+    // FORCED_CLOSE con el mismo cloud_id que el espejo OPEN actual; la ruta numérica debe elegir el
+    // turno vigente y devolver el mismo detalle rico (ítems + pagos) que el backend.
+    db.run("UPDATE cash_sessions SET cloud_id=9002 WHERE client_session_uuid='stale-session-smoke'");
+    const currentSessionSales = await fetch(`${branchUrl}/cash-sessions/9002/sales`);
+    const currentSessionSalesBody = await currentSessionSales.json();
+    assert.equal(currentSessionSales.status, 200);
+    assert.equal(currentSessionSalesBody.length, 1);
+    assert.equal(currentSessionSalesBody[0].items.length, 1);
+    assert.equal(currentSessionSalesBody[0].items[0].productName, 'Producto Smoke');
+    assert.equal(currentSessionSalesBody[0].payments.length, 1);
+    assert.equal(currentSessionSalesBody[0].payments[0].paymentMethod, 'EFECTIVO');
 
     // Un segundo empleado en el mismo dispositivo no hereda ni puede vender sobre el turno del primero.
     db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('employee_id', '7')");
@@ -414,7 +498,7 @@ async function run() {
     }
     await restarted.shutdown();
     restarted = null;
-    console.log('[SMOKE] Electron image cache + venta/caja local: OK');
+    console.log('[SMOKE] Electron inventario remoto + imagen/venta/caja local: OK');
   } finally {
     await close(sourceServer);
     if (localServerStarted) {

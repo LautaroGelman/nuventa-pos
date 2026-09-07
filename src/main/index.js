@@ -6,7 +6,7 @@
 // Watches sessionStorage for auth tokens → saves locally for
 // offline auth + sync.
 // ============================================================
-const { app, BrowserWindow, ipcMain, dialog, session, Menu, net, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, session, Menu, net, shell, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs   = require('fs');
 const configStore = require('./config-store');
@@ -35,6 +35,7 @@ let lastKnownToken = null;
 let loggedOut = false; // set on logout to block token re-injection on next page load
 let sessionRevocationInProgress = false;
 let installQuitInProgress = false;
+let displaySleepBlockerId = null;
 
 // ── Enlarge cache ────────────────────────────────────────
 app.commandLine.appendSwitch('disk-cache-size', '524288000'); // 500 MB
@@ -101,7 +102,7 @@ async function applyActiveBranch(value) {
   }
 
   console.log(`[AUTH] Sucursal activa actualizada: ${sucursalId}`);
-  if (syncService) await syncService.forceSync();
+  if (syncService) await syncService.refreshCatalog();
   return { success: true, sucursalId };
 }
 
@@ -229,7 +230,7 @@ async function installReadyUpdate() {
   const prepared = await updateService.prepareInstallation(async (version) => {
     if (syncService) {
       syncService.stop();
-      await syncService.drain(3000);
+      if (!await syncService.drain(3000)) throw new Error('Todavía hay una sincronización en curso. Reintentá en unos segundos.');
     }
     checkDatabaseIntegrity();
     const backup = backupDatabaseForUpdate(version);
@@ -243,16 +244,14 @@ async function installReadyUpdate() {
 
   stopOnlineCheck();
   stopTokenWatcher();
-  await stopLocalServer();
-  closeDatabase();
+  // Keep the paused local services available until Electron actually quits.
+  // An emitted installer error can then recover without changing the local port.
   installQuitInProgress = true;
   if (updateService.installDownloadedUpdate()) return { success: true };
   installQuitInProgress = false;
 
-  // If launching the installer fails synchronously, reopen the local services so the POS remains usable.
+  // No service was destroyed: release maintenance and resume on launch failure.
   try {
-    await initDatabase();
-    await startLocalServer();
     setMaintenanceLock(false);
     startOnlineCheck();
     startTokenWatcher();
@@ -368,6 +367,13 @@ function stopTokenWatcher() {
 }
 
 async function handleTokenCaptured(token) {
+  // Offline password validation already established both identity stores. It must
+  // never extend the remote authorization grace period or overwrite the cloud JWT.
+  const offlineUser = authService.getCurrentUser();
+  if (offlineUser?.offlineMode && offlineUser.token === token) {
+    if (syncService) syncService.start();
+    return;
+  }
   const jwt = parseJwt(token);
   if (!jwt) {
     console.warn('[TOKEN] Failed to parse JWT');
@@ -677,9 +683,23 @@ function registerIpcHandlers() {
     return printerService.getState(event.sender);
   });
 
-  ipcMain.handle('printer:save-config', (event, config) => {
+  ipcMain.handle('printer:open-settings', async (event) => {
     if (!isTrustedSender(event)) return { success: false, error: 'Origen no autorizado.' };
     try {
+      await shell.openExternal('ms-settings:printers');
+      return { success: true };
+    } catch (error) { return { success: false, error: error.message }; }
+  });
+
+  ipcMain.handle('printer:save-config', async (event, config) => {
+    if (!isTrustedSender(event)) return { success: false, error: 'Origen no autorizado.' };
+    try {
+      if (config?.selectedPrinter) {
+        const printers = await printerService.listPrinters(event.sender);
+        if (!printers.some((p) => p.name === config.selectedPrinter)) {
+          return { success: false, error: 'La impresora ya no aparece en Windows. Volvé a buscarla.' };
+        }
+      }
       return { success: true, config: printerService.saveConfig(config) };
     } catch (err) {
       return { success: false, error: err.message };
@@ -948,6 +968,10 @@ if (!gotSingleInstanceLock) {
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return; // 2da instancia: ya se llamó app.quit(); no inicializar nada
 
+  // Keep the checkout screen awake for the entire app lifetime, including when minimized.
+  // This is a process-scoped request, not a permanent change to the Windows power plan.
+  displaySleepBlockerId = powerSaveBlocker.start('prevent-display-sleep');
+
   // 1. Config
   configStore.loadConfig();
 
@@ -1079,6 +1103,9 @@ app.whenReady().then(async () => {
   loginEvents.on('local-mutation', () => {
     if (syncService) syncService.notifyLocalMutation();
   });
+  loginEvents.on('cash-session-closed', () => {
+    if (syncService) void syncService.forceSync({ urgent: true });
+  });
   if (apiClient.token) syncService.start();
 
   // The Microsoft Store owns updates for MSIX installs. Direct NSIS installs
@@ -1095,6 +1122,13 @@ app.whenReady().then(async () => {
     requestHeaders: updateRequestHeaders,
   });
   updateService.on('status', (status) => {
+    if (status.state === 'recoverable-error' && installQuitInProgress) {
+      installQuitInProgress = false;
+      setMaintenanceLock(false);
+      startOnlineCheck();
+      startTokenWatcher();
+      if (syncService && apiClient.token) syncService.start();
+    }
     console.log(`[UPDATER] ${status.state}${status.availableVersion ? ` v${status.availableVersion}` : ''}`);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('updater:status', status);
@@ -1108,6 +1142,13 @@ app.whenReady().then(async () => {
   // 10. Load the app — web frontend (online) or fallback (offline)
   //     Cached token is injected by the preload script.
   await loadApp();
+});
+
+app.on('will-quit', () => {
+  if (displaySleepBlockerId !== null) {
+    powerSaveBlocker.stop(displaySleepBlockerId);
+    displaySleepBlockerId = null;
+  }
 });
 
 app.on('window-all-closed', async () => {
@@ -1127,7 +1168,8 @@ app.on('window-all-closed', async () => {
     const db = getDb();
     db.run("DELETE FROM app_config WHERE key = 'auth_token'");
     db.run("DELETE FROM app_config WHERE key = 'roles'"); // R4-#37: roles no deben sobrevivir a otro login
-    db.run("UPDATE users SET last_token = NULL"); // A10: que el login offline no reuse el token tras cerrar la app
+    // Keep the encrypted cloud credential behind the next password login. The UI
+    // session is cleared above; no user is automatically logged in on restart.
     db.save();
   } catch { /* best-effort */ }
   await imageCache.shutdown();
