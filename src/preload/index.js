@@ -75,6 +75,7 @@ contextBridge.exposeInMainWorld('nuventaUpdater', {
   check: () => ipcRenderer.invoke('updater:check'),
   retry: () => ipcRenderer.invoke('updater:retry'),
   install: () => ipcRenderer.invoke('updater:install'),
+  defer: () => ipcRenderer.invoke('updater:defer'),
   openStore: () => ipcRenderer.invoke('updater:open-store'),
   onStatus: (callback) => {
     const handler = (_event, data) => callback(data);

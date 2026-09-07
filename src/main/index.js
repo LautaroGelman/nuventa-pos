@@ -620,7 +620,24 @@ function registerIpcHandlers() {
 
   ipcMain.handle('updater:install', async (event) => {
     if (!isTrustedSender(event) || !updateService) return { success: false, error: 'Origen no autorizado.' };
-    return installReadyUpdate();
+    return updateService.confirmInstallation(async () => {
+      const result = await dialog.showMessageBox(mainWindow, {
+        type: 'info',
+        title: 'Actualizar Nuventa POS',
+        message: 'Antes de actualizar',
+        detail: 'Nuventa se cerrará para instalar la actualización y volverá a abrirse.\n\nWindows puede mostrar un cartel que pregunta si permitís que Nuventa haga cambios en el equipo. Seleccioná “Sí” o “Aceptar” para continuar.\n\nSi elegís “No” en Windows, la actualización no se instalará. Podés volver a abrir Nuventa y seguir trabajando; no volveremos a pedirte instalar esta versión.\n\nSi ahora preferís seguir trabajando, elegí “Ahora no”. Podés retomarla desde el menú Nuventa POS → Buscar actualizaciones.',
+        buttons: ['Continuar y actualizar', 'Ahora no'],
+        defaultId: 1,
+        cancelId: 1,
+        noLink: true,
+      });
+      return result.response === 0;
+    }, installReadyUpdate);
+  });
+
+  ipcMain.handle('updater:defer', (event) => {
+    if (!isTrustedSender(event) || !updateService) return { state: 'disabled' };
+    return updateService.defer();
   });
 
   ipcMain.handle('updater:open-store', async (event) => {
@@ -918,6 +935,10 @@ function buildMenu() {
           },
         },
         { type: 'separator' },
+        {
+          label: 'Buscar actualizaciones',
+          click: () => { if (updateService) void updateService.requestNotification(); },
+        },
         {
           label: 'Recargar página',
           accelerator: 'CmdOrCtrl+R',

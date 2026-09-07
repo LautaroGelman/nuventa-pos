@@ -78,6 +78,7 @@ class UpdateService extends EventEmitter {
     this._lastCheckAt = 0;
     this._downloadedVersion = null;
     this._installationPrepared = false;
+    this._confirmationPromise = null;
     this._started = false;
     this._history = [];
     this._diagnosticPath = typeof app.getPath === 'function'
@@ -86,6 +87,7 @@ class UpdateService extends EventEmitter {
       state: 'idle', currentVersion: app.getVersion(), availableVersion: null,
       percent: null, error: null, errorCode: null, attempts: 0, lastCheckAt: null,
       channel: new URL(this.feedUrl).pathname.slice(1), feedUrl: this.feedUrl,
+      dismissedVersion: null,
     };
     this._restoreDiagnostics();
   }
@@ -172,6 +174,31 @@ class UpdateService extends EventEmitter {
     return this.checkForUpdates({ force: true });
   }
 
+  defer() {
+    if (this._status.availableVersion) {
+      this._setStatus({ dismissedVersion: this._status.availableVersion });
+    }
+    return this.getStatus();
+  }
+
+  async requestNotification() {
+    this._setStatus({ dismissedVersion: null });
+    return this.retry();
+  }
+
+  async confirmInstallation(confirm, install) {
+    if (this._confirmationPromise) return this._confirmationPromise;
+    if (this._status.state !== 'ready') return { success: false, error: 'No hay una actualización lista para instalar.' };
+    // Persist before launching NSIS: Windows can reject elevation after the POS exits.
+    this.defer();
+    this._confirmationPromise = Promise.resolve().then(async () => {
+      if (!await confirm()) return { success: false, cancelled: true };
+      return install();
+    });
+    try { return await this._confirmationPromise; }
+    finally { this._confirmationPromise = null; }
+  }
+
   async prepareInstallation(prepare) {
     if (!this._downloadedVersion || this._status.state !== 'ready') return false;
     this._installationPrepared = false;
@@ -244,6 +271,8 @@ class UpdateService extends EventEmitter {
       const previous = JSON.parse(fs.readFileSync(this._diagnosticPath, 'utf8'));
       this._status.lastCheckAt = previous.lastCheckAt || null;
       this._status.attempts = Number(previous.attempts || 0);
+      this._status.dismissedVersion = typeof previous.dismissedVersion === 'string'
+        ? previous.dismissedVersion : null;
       this._status.error = previous.error || null;
       this._status.errorCode = previous.errorCode || null;
       this._history = Array.isArray(previous.history) ? previous.history.slice(-100) : [];

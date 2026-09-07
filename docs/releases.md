@@ -62,6 +62,15 @@ automática en segundo plano; instalar requiere **Reiniciar y actualizar** en el
 aviso del frontend. **Más tarde** permite continuar. El cierre normal no instala
 ni espera descargas (`autoInstallOnAppQuit=false`). En desarrollo está desactivado.
 
+Antes de instalar se muestra una confirmación que explica el permiso de Windows
+(seleccionar “Sí” o “Aceptar”). “Ahora no”, Escape o “Más tarde” conservan la app
+en funcionamiento. La decisión se guarda por versión en el perfil y sobrevive a
+recargas/reinicios; no se repite el aviso de esa versión. Se guarda también antes
+de lanzar NSIS, porque el usuario puede rechazar el permiso después de cerrar el
+POS. En ese caso puede volver a abrirlo sin otro pedido automático. El menú
+**Nuventa POS → Buscar actualizaciones** permite retomar el aviso voluntariamente.
+Una versión nueva puede mostrar su propio aviso.
+
 Antes de `quitAndInstall`, el POS bloquea operaciones nuevas, drena hasta tres segundos la petición
 en curso, ejecuta `PRAGMA integrity_check` y crea un backup verificado. Un fallo cancela la
 instalación y vuelve a habilitar el POS. Un rollback se publica siempre con una versión superior.
