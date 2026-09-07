@@ -20,9 +20,8 @@ on:
         default: main
         type: string
       backend_sha:
-        description: Backend commit recorded in provenance
-        required: false
-        default: main
+        description: Full backend commit SHA recorded in provenance (backend is not packaged)
+        required: true
         type: string
       unsigned_preview:
         description: Allow an unsigned pilot/direct preview
@@ -48,7 +47,7 @@ jobs:
     environment: ${{ inputs.ring == 'stable' && 'production' || 'preview' }}
     env:
       NUVENTA_FRONTEND_DIR: ${{ github.workspace }}\frontend
-      NUVENTA_BACKEND_DIR: ${{ github.workspace }}\backend
+      NUVENTA_BACKEND_COMMIT: ${{ inputs.backend_sha }}
       NEXT_PUBLIC_API_URL: ''
       CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
       CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
@@ -80,14 +79,6 @@ jobs:
           token: ${{ secrets.FRONTEND_REPOSITORY_TOKEN }}
           path: frontend
 
-      - name: Checkout backend provenance
-        uses: actions/checkout@v4
-        with:
-          repository: LautaroGelman/nuventa-backend
-          ref: ${{ inputs.backend_sha }}
-          token: ${{ secrets.BACKEND_REPOSITORY_TOKEN || secrets.FRONTEND_REPOSITORY_TOKEN }}
-          path: backend
-
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -101,6 +92,7 @@ jobs:
         shell: pwsh
         run: |
           if ('${{ inputs.version }}' -notmatch '^\d+\.\d+\.\d+$') { throw 'version must be explicit SemVer.' }
+          if ($env:NUVENTA_BACKEND_COMMIT -notmatch '^[0-9a-f]{40}$') { throw 'backend_sha must be a full commit SHA.' }
           if ('${{ inputs.ring }}' -eq 'stable' -and '${{ inputs.unsigned_preview }}' -eq 'true') { throw 'Stable can never be unsigned.' }
           $required = @('AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','R2_ENDPOINT_URL')
           if ('${{ inputs.ring }}' -eq 'pilot') { $required += @('CF_ACCESS_CLIENT_ID','CF_ACCESS_CLIENT_SECRET') }
