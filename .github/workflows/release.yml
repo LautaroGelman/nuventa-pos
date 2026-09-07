@@ -1,86 +1,116 @@
 name: Release Windows POS
 
 on:
-  push:
-    branches: [master]
-  repository_dispatch:
-    types: [frontend_main_updated]
   workflow_dispatch:
     inputs:
-      frontend_sha:
-        description: Frontend commit to package (defaults to main)
-        required: false
+      version:
+        description: Exact SemVer to publish
+        required: true
+        default: 1.1.0
         type: string
+      ring:
+        description: R2 release ring
+        required: true
+        default: pilot
+        type: choice
+        options: [pilot, direct, stable]
+      frontend_sha:
+        description: Frontend commit to package
+        required: false
+        default: main
+        type: string
+      backend_sha:
+        description: Full backend commit SHA recorded in provenance (backend is not packaged)
+        required: true
+        type: string
+      unsigned_preview:
+        description: Allow an unsigned pilot/direct preview
+        required: true
+        default: true
+        type: boolean
+      publish_store_flight:
+        description: Submit this exact MSIX to the configured private flight
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
 
 concurrency:
-  group: nuventa-pos-stable-release
+  group: nuventa-pos-${{ inputs.ring }}-release
   cancel-in-progress: false
 
 jobs:
   release:
     runs-on: windows-latest
-    environment: production
+    environment: ${{ inputs.ring == 'stable' && 'production' || 'preview' }}
     env:
       NUVENTA_FRONTEND_DIR: ${{ github.workspace }}\frontend
-      ALLOW_UNSIGNED_RELEASE: ${{ vars.POS_ALLOW_UNSIGNED_RELEASE == 'true' && 'true' || 'false' }}
+      NUVENTA_BACKEND_COMMIT: ${{ inputs.backend_sha }}
+      NEXT_PUBLIC_API_URL: ''
       CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
       CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      WIN_CSC_PUBLISHER_NAME: ${{ secrets.WIN_CSC_PUBLISHER_NAME }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       AWS_DEFAULT_REGION: auto
       R2_ENDPOINT_URL: ${{ secrets.R2_ENDPOINT_URL }}
       R2_BUCKET: nuventa-pos-releases
       R2_PUBLIC_BASE_URL: https://descargas.nuventa.com.ar
+      CF_API_TOKEN: ${{ secrets.CF_CACHE_PURGE_TOKEN }}
+      CF_ZONE_ID: ${{ secrets.CF_ZONE_ID }}
+      CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+      CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
       MS_STORE_PACKAGE_NAME: ${{ secrets.MS_STORE_PACKAGE_NAME }}
       MS_STORE_PUBLISHER: ${{ secrets.MS_STORE_PUBLISHER }}
       MS_STORE_PUBLISHER_DISPLAY_NAME: ${{ secrets.MS_STORE_PUBLISHER_DISPLAY_NAME }}
+      MS_STORE_FLIGHT_ID: ${{ secrets.MS_STORE_FLIGHT_ID }}
 
     steps:
       - name: Checkout POS
         uses: actions/checkout@v4
 
-      - name: Resolve frontend commit
-        id: frontend
-        shell: pwsh
-        run: |
-          $sha = '${{ github.event.client_payload.frontend_sha }}'
-          if ([string]::IsNullOrWhiteSpace($sha)) { $sha = '${{ inputs.frontend_sha }}' }
-          if ([string]::IsNullOrWhiteSpace($sha)) { $sha = 'main' }
-          "sha=$sha" | Add-Content -Path $env:GITHUB_OUTPUT
-
       - name: Checkout exact frontend
         uses: actions/checkout@v4
         with:
           repository: LautaroGelman/nuventa-frontend
-          ref: ${{ steps.frontend.outputs.sha }}
+          ref: ${{ inputs.frontend_sha }}
           token: ${{ secrets.FRONTEND_REPOSITORY_TOKEN }}
           path: frontend
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - uses: pnpm/action-setup@v4
         with:
           version: 10.29.2
 
-      - name: Validate release secrets
+      - name: Validate release inputs and secrets
         shell: pwsh
         run: |
-          $required = @('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'R2_ENDPOINT_URL')
-          if ($env:ALLOW_UNSIGNED_RELEASE -ne 'true') {
-            $required += @('CSC_LINK', 'CSC_KEY_PASSWORD')
-          } else {
-            Write-Warning 'TEST MODE: the installer will be published without an Authenticode signature.'
-          }
+          if ('${{ inputs.version }}' -notmatch '^\d+\.\d+\.\d+$') { throw 'version must be explicit SemVer.' }
+          if ($env:NUVENTA_BACKEND_COMMIT -notmatch '^[0-9a-f]{40}$') { throw 'backend_sha must be a full commit SHA.' }
+          if ('${{ inputs.ring }}' -eq 'stable' -and '${{ inputs.unsigned_preview }}' -eq 'true') { throw 'Stable can never be unsigned.' }
+          $required = @('AWS_ACCESS_KEY_ID','AWS_SECRET_ACCESS_KEY','R2_ENDPOINT_URL')
+          if ('${{ inputs.ring }}' -eq 'pilot') { $required += @('CF_ACCESS_CLIENT_ID','CF_ACCESS_CLIENT_SECRET') }
+          if ('${{ inputs.ring }}' -ne 'pilot') { $required += @('CF_API_TOKEN','CF_ZONE_ID') }
+          if ('${{ inputs.unsigned_preview }}' -ne 'true') { $required += @('CSC_LINK','CSC_KEY_PASSWORD','WIN_CSC_PUBLISHER_NAME') }
           foreach ($name in $required) {
-            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
-              throw "Missing production secret: $name"
-            }
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) { throw "Missing release secret: $name" }
+          }
+
+      - name: Verify publishing access before building or uploading
+        shell: pwsh
+        run: |
+          aws s3api head-bucket --bucket $env:R2_BUCKET --endpoint-url $env:R2_ENDPOINT_URL
+          if ($LASTEXITCODE -ne 0) { throw 'R2 bucket access failed.' }
+          if ('${{ inputs.ring }}' -ne 'pilot') {
+            $body = @{ files = @("$env:R2_PUBLIC_BASE_URL/${{ inputs.ring }}/release-access-check") } | ConvertTo-Json
+            $result = Invoke-RestMethod -Method Post -Uri "https://api.cloudflare.com/client/v4/zones/$env:CF_ZONE_ID/purge_cache" -Headers @{ Authorization = "Bearer $env:CF_API_TOKEN" } -ContentType 'application/json' -Body $body
+            if (-not $result.success) { throw 'Cloudflare cache purge access failed.' }
           }
 
       - name: Install dependencies
@@ -89,58 +119,91 @@ jobs:
           npm ci
           pnpm --dir frontend install --frozen-lockfile
 
-      - name: Assign monotonic release version
-        id: version
+      - name: Set exact release version
         shell: pwsh
-        run: |
-          $version = "1.0.${{ github.run_number }}"
-          npm version $version --no-git-tag-version
-          "version=$version" | Add-Content -Path $env:GITHUB_OUTPUT
+        run: npm version '${{ inputs.version }}' --no-git-tag-version
 
       - name: Test POS and frontend
         shell: pwsh
         run: |
           npm run check
+          npm run test:regressions
           pnpm --dir frontend test
+          pnpm --dir frontend exec tsc --noEmit
 
-      - name: Build NSIS installer
+      - name: Build NSIS installer once
         shell: pwsh
         run: |
-          if ($env:ALLOW_UNSIGNED_RELEASE -eq 'true') {
+          if ('${{ inputs.unsigned_preview }}' -eq 'true') {
             $env:CSC_IDENTITY_AUTO_DISCOVERY = 'false'
             Remove-Item Env:CSC_LINK,Env:CSC_KEY_PASSWORD -ErrorAction SilentlyContinue
+            npm run build:release
+          } else {
+            npm run build:web
+            npm run provenance
+            npx electron-builder --win nsis --x64 --publish never `
+              -c.win.publisherName="$env:WIN_CSC_PUBLISHER_NAME" `
+              -c.win.timeStampServer="http://timestamp.digicert.com"
           }
-          npm run build:release
 
-      - name: Build unsigned Microsoft Store MSIX
-        if: ${{ env.MS_STORE_PACKAGE_NAME != '' }}
-        shell: pwsh
-        run: npm run build:store -- -SkipFrontendBuild
-
-      - name: Publish atomically to Cloudflare R2
+      - name: Publish immutable bytes and pointers to R2
         shell: pwsh
         run: |
-          $frontendCommit = git -C frontend rev-parse HEAD
-          $posCommit = git rev-parse HEAD
-          $publishArgs = @{
-            Version = '${{ steps.version.outputs.version }}'
-            FrontendCommit = $frontendCommit
-            PosCommit = $posCommit
+          $publish = @{
+            Version = '${{ inputs.version }}'; Ring = '${{ inputs.ring }}'
+            FrontendCommit = (git -C frontend rev-parse HEAD); PosCommit = (git rev-parse HEAD)
           }
-          if ($env:ALLOW_UNSIGNED_RELEASE -eq 'true') {
-            $publishArgs.AllowUnsigned = $true
-          }
-          ./scripts/publish-release.ps1 @publishArgs
+          if ('${{ inputs.unsigned_preview }}' -eq 'true') { $publish.AllowUnsignedPreview = $true }
+          ./scripts/publish-release.ps1 @publish
+
+      - name: Build Store MSIX from the same frontend and code
+        if: ${{ inputs.publish_store_flight }}
+        shell: pwsh
+        run: npm run build:store -- -SkipFrontendBuild -Version '${{ inputs.version }}.0'
+
+      - name: Run Windows App Certification Kit
+        if: ${{ inputs.publish_store_flight }}
+        shell: pwsh
+        run: |
+          $appcert = "${env:ProgramFiles(x86)}\Windows Kits\10\App Certification Kit\appcert.exe"
+          if (-not (Test-Path $appcert)) { throw 'Windows App Certification Kit is unavailable.' }
+          $msix = (Get-ChildItem dist\store\*.msix | Select-Object -First 1).FullName
+          & $appcert reset
+          & $appcert test -appxpackagepath $msix -reportoutputpath dist\store\wack-report.xml
+          if ($LASTEXITCODE -ne 0) { throw 'WACK failed.' }
+
+      - name: Setup Microsoft Store Developer CLI
+        if: ${{ inputs.publish_store_flight }}
+        uses: microsoft/microsoft-store-apppublisher@v1.1
+
+      - name: Publish and poll private Store flight
+        if: ${{ inputs.publish_store_flight }}
+        shell: pwsh
+        env:
+          PARTNER_TENANT_ID: ${{ secrets.PARTNER_CENTER_TENANT_ID }}
+          PARTNER_SELLER_ID: ${{ secrets.PARTNER_CENTER_SELLER_ID }}
+          PARTNER_CLIENT_ID: ${{ secrets.PARTNER_CENTER_CLIENT_ID }}
+          PARTNER_CLIENT_SECRET: ${{ secrets.PARTNER_CENTER_CLIENT_SECRET }}
+        run: |
+          $required = @('PARTNER_TENANT_ID','PARTNER_SELLER_ID','PARTNER_CLIENT_ID','PARTNER_CLIENT_SECRET','MS_STORE_FLIGHT_ID')
+          foreach ($name in $required) { if (-not [Environment]::GetEnvironmentVariable($name)) { throw "Missing Store secret: $name" } }
+          msstore reconfigure --tenantId $env:PARTNER_TENANT_ID --sellerId $env:PARTNER_SELLER_ID --clientId $env:PARTNER_CLIENT_ID --clientSecret $env:PARTNER_CLIENT_SECRET
+          $msix = (Get-ChildItem dist\store\*.msix | Select-Object -First 1).FullName
+          msstore publish . --inputFile $msix --appId 9MWQ82CX7C5B --flightId $env:MS_STORE_FLIGHT_ID --packageRolloutPercentage 100
+          msstore flights submission poll 9MWQ82CX7C5B $env:MS_STORE_FLIGHT_ID
 
       - name: Keep release evidence
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
-          name: nuventa-pos-${{ steps.version.outputs.version }}
+          name: nuventa-pos-${{ inputs.version }}-${{ inputs.ring }}
           path: |
-            dist/Nuventa-POS-Setup-${{ steps.version.outputs.version }}.exe
-            dist/Nuventa-POS-Setup-${{ steps.version.outputs.version }}.exe.blockmap
+            dist/Nuventa-POS-Setup-${{ inputs.version }}.exe
+            dist/Nuventa-POS-Setup-${{ inputs.version }}.exe.blockmap
             dist/latest.yml
             dist/release.json
             dist/store/*.msix
-          if-no-files-found: error
+            dist/store/wack-report.xml
+            build-provenance.json
+          if-no-files-found: warn
           retention-days: 30

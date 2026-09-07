@@ -10,6 +10,12 @@
 
 ## 1. Dos caminos de login
 
+El ingreso offline restaura la identidad y el token en `app_config` después de validar la contraseña.
+Si el JWT remoto cacheado todavía es válido, se reutiliza. Si venció, se emite una credencial local
+limitada a este proceso y al plazo offline restante, nunca enviada al backend. La sincronización
+espera un nuevo ingreso online. Reiniciar el POS no extiende los siete días ni evita la contraseña.
+Una respuesta de autenticación iniciada por un token anterior no revoca un login posterior.
+
 El frontend de Nuventa hace el login normal por la web (`POST /api/auth/login`). En Electron ese
 request lo atiende el **servidor local**, que delega en `authService.login()`. Además existe una
 **página de fallback offline** (`src/renderer/`) que se usa solo si la web no carga; llama a

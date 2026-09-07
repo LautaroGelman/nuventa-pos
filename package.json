@@ -1,34 +1,37 @@
 {
   "name": "nuventa-pos",
-  "version": "1.0.2",
+  "version": "1.1.0",
   "description": "Nuventa POS - Punto de Venta Offline-First para Windows",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
     "start:dev": "electron . --dev",
-    "test": "node --test test/*.test.js",
+    "test": "node scripts/run-tests.js",
     "test:smoke": "node test/run-electron-smoke.js",
-    "check": "node --check src/main/api-client.js && node --check src/main/auth-service.js && node --check src/main/index.js && node --check src/main/sync-service.js && node --check src/main/update-service.js && node --check src/main/image-cache.js && node --check src/main/local-server.js && node --test test/*.test.js",
+    "test:cloud": "node scripts/real-cloud-smoke.js",
+    "test:cloud:electron": "node test/run-electron-cloud-smoke.js",
+    "test:cloud:electron:mutation": "node test/run-electron-cloud-smoke.js --mutate",
+    "check": "node --check src/main/api-client.js && node --check src/main/auth-service.js && node --check src/main/index.js && node --check src/main/printer-service.js && node --check src/main/sync-service.js && node --check src/main/sync-bundle-v2.js && node --check src/main/update-service.js && node --check src/main/image-cache.js && node --check src/main/local-server.js && node scripts/run-tests.js",
+    "provenance": "node scripts/generate-provenance.js",
     "build:frontend": "node scripts/build-web.js --build-only",
     "build:web": "node scripts/build-web.js",
-    "build": "npm run build:web && electron-builder --win",
-    "build:release": "npm run build:web && electron-builder --win nsis --publish never",
+    "build": "npm run build:web && npm run provenance && electron-builder --win --x64",
+    "build:release": "npm run build:web && npm run provenance && electron-builder --win nsis --x64 --publish never",
     "build:store": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-store.ps1",
-    "build:portable": "npm run build:web && electron-builder --win portable"
+    "build:portable": "npm run build:web && electron-builder --win portable",
+    "test:regressions": "node test/run-electron-regressions.js"
   },
   "author": "Nuventa",
   "license": "UNLICENSED",
   "private": true,
   "dependencies": {
-    "electron-updater": "^6.6.2",
+    "electron-updater": "6.8.9",
     "sql.js": "^1.11.0"
   },
   "devDependencies": {
-    "electron": "^33.2.0",
-    "electron-builder": "^25.1.8"
-  },
-  "optionalDependencies": {
-    "@microsoft/winappcli": "0.6.0"
+    "@microsoft/winappcli": "0.6.2",
+    "electron": "44.1.1",
+    "electron-builder": "26.15.3"
   },
   "overrides": {
     "js-yaml": "4.3.1"
@@ -52,13 +55,14 @@
     "publish": [
       {
         "provider": "generic",
-        "url": "https://descargas.nuventa.com.ar/stable",
+        "url": "https://descargas.nuventa.com.ar/direct",
         "channel": "latest"
       }
     ],
     "files": [
       "src/**/*",
       "pos-contract.json",
+      "build-provenance.json",
       "assets/**/*",
       "resources/web/**/*",
       "node_modules/sql.js/dist/**/*"

@@ -73,6 +73,11 @@ contextBridge.exposeInMainWorld('nuventaSync', {
 contextBridge.exposeInMainWorld('nuventaUpdater', {
   getStatus: () => ipcRenderer.invoke('updater:status'),
   check: () => ipcRenderer.invoke('updater:check'),
+  retry: () => ipcRenderer.invoke('updater:retry'),
+  install: () => ipcRenderer.invoke('updater:install'),
+  defer: () => ipcRenderer.invoke('updater:defer'),
+  beforeLogout: () => ipcRenderer.invoke('updater:before-logout'),
+  openStore: () => ipcRenderer.invoke('updater:open-store'),
   onStatus: (callback) => {
     const handler = (_event, data) => callback(data);
     ipcRenderer.on('updater:status', handler);
@@ -80,14 +85,28 @@ contextBridge.exposeInMainWorld('nuventaUpdater', {
   },
 });
 
+contextBridge.exposeInMainWorld('nuventaDiagnostics', {
+  export: () => ipcRenderer.invoke('diagnostics:export'),
+});
+
 // ── Impresora térmica / fiscal ──────────────────────────────
 // Permite que la app web (corriendo dentro del POS) liste las impresoras conectadas, recuerde
 // la elegida por equipo e imprima el PDF del comprobante en silencio. En un navegador normal
 // `window.nuventaPrinter` no existe → el frontend cae al fallback de descarga/impresión manual.
 contextBridge.exposeInMainWorld('nuventaPrinter', {
+  version: 2,
+  getState: () => ipcRenderer.invoke('printer:get-state'),
+  saveConfig: (config) => ipcRenderer.invoke('printer:save-config', config),
+  openSettings: () => ipcRenderer.invoke('printer:open-settings'),
   list: () => ipcRenderer.invoke('printer:list'),
   getSelected: () => ipcRenderer.invoke('printer:get-selected'),
   setSelected: (name) => ipcRenderer.invoke('printer:set-selected', name),
-  // bytes: Uint8Array | ArrayBuffer con el PDF; opts: { deviceName? }
+  // bytes: Uint8Array | ArrayBuffer con el PDF.
   printPdf: (bytes, opts) => ipcRenderer.invoke('printer:print-pdf', bytes, opts),
+  printTicket: (ticket, opts) => ipcRenderer.invoke('printer:print-ticket', ticket, opts),
+  onJobStatus: (callback) => {
+    const handler = (_event, status) => callback(status);
+    ipcRenderer.on('printer:job-status', handler);
+    return () => ipcRenderer.removeListener('printer:job-status', handler);
+  },
 });
