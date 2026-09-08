@@ -28,8 +28,9 @@ indistinguible del backend real.
 | **Inventario / Multifunción** | Local-first + sync manual | Igual que cajero, más botón de sincronización manual. |
 | **Administrador / Dueño** | Online | Sin SQLite local: cada request se reenvía (proxy) a la nube en tiempo real. |
 
-La búsqueda de inventario "en todas las sucursales" (`/inventory/all-branches`) **siempre** va
-a la nube, sin importar el rol — requiere conexión activa.
+La búsqueda de inventario "en todas las sucursales" (`GET /inventory/page`) **siempre** va
+a la nube, sin importar el rol — requiere conexión activa y es de solo lectura para empleados
+atados a una sucursal. El catálogo de la sucursal activa (`GET /items/page`) continúa local-first.
 
 ## Arquitectura (resumen)
 

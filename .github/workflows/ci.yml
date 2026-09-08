@@ -1,0 +1,29 @@
+name: POS CI
+
+on:
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pos-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pos-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate POS
+        run: npm run check

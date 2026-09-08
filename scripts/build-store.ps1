@@ -41,7 +41,15 @@ if (@($versionParts | Where-Object { $_ -gt 65535 }).Count -gt 0) {
 }
 
 $layoutRoot = Join-Path $projectRoot 'dist\store-layout'
-$layoutDirectory = Join-Path $layoutRoot 'win-unpacked'
+$directLayoutDirectory = Join-Path $projectRoot 'dist\win-unpacked'
+if ($SkipFrontendBuild -and -not (Test-Path -LiteralPath (Join-Path $directLayoutDirectory 'Nuventa POS.exe'))) {
+  throw '-SkipFrontendBuild requires dist\win-unpacked from the already tested NSIS build.'
+}
+$layoutDirectory = if ($SkipFrontendBuild -and (Test-Path -LiteralPath (Join-Path $directLayoutDirectory 'Nuventa POS.exe'))) {
+  $directLayoutDirectory
+} else {
+  Join-Path $layoutRoot 'win-unpacked'
+}
 $storeOutput = Join-Path $projectRoot 'dist\store'
 $manifestDirectory = Join-Path $storeOutput 'manifest'
 $manifestPath = Join-Path $manifestDirectory 'Package.appxmanifest'
@@ -55,10 +63,14 @@ if (-not $SkipFrontendBuild) {
   }
   & npm.cmd run build:web
   if ($LASTEXITCODE -ne 0) { throw 'Fallo la compilacion del frontend para Store.' }
+  & npm.cmd run provenance
+  if ($LASTEXITCODE -ne 0) { throw 'Fallo la generacion de provenance para Store.' }
 }
 
-& npx.cmd electron-builder --win --x64 --dir "--config.directories.output=$layoutRoot"
-if ($LASTEXITCODE -ne 0) { throw 'electron-builder no pudo crear el layout x64.' }
+if ($layoutDirectory -ne $directLayoutDirectory) {
+  & npx.cmd electron-builder --win --x64 --dir "--config.directories.output=$layoutRoot"
+  if ($LASTEXITCODE -ne 0) { throw 'electron-builder no pudo crear el layout x64.' }
+}
 if (-not (Test-Path -LiteralPath $executablePath -PathType Leaf)) {
   throw "No se encontro el ejecutable empaquetado: $executablePath"
 }

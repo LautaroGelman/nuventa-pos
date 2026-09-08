@@ -15,6 +15,7 @@ let _saveTimer = null;
 let _dbKey = null; // clave AES-256 para cifrar la DB en reposo (derivada del safeStorage del SO)
 let _warnedNoPersist = false;     // R4-#7: avisar una sola vez del modo solo-memoria
 let _loadedLegacyPlaintext = false; // R4-#55: la DB cargada estaba en texto plano (migración pendiente)
+let _maintenanceLocked = false;
 
 // ── Cifrado en reposo de la DB (sin dependencia nueva: node:crypto + Electron safeStorage) ──
 // Antes el .sqlite quedaba en TEXTO PLANO en disco (hashes, emails, ventas, etc.). Ahora se cifra
@@ -125,7 +126,7 @@ async function initDatabase() {
   console.log('[DB] Database initialized successfully');
 }
 
-function _persist() {
+function _persist(throwOnError = false) {
   if (!db || !dbPath) return;
   // R4-#7: sin clave del SO NO se escribe la DB en TEXTO PLANO (mismo criterio que token-crypto).
   // Se opera en memoria esta sesión: preferible perder persistencia a filtrar PII/hashes/ventas a disco.
@@ -134,14 +135,41 @@ function _persist() {
       console.error('[DB] safeStorage no disponible — la base NO se persiste (modo solo-memoria) para evitar texto plano.');
       _warnedNoPersist = true;
     }
+    if (throwOnError) {
+      throw new Error('El almacenamiento seguro de Windows no está disponible; no se puede confirmar una operación durable');
+    }
     return;
   }
+  let tmp = null;
   try {
     const out = _encryptDb(Buffer.from(db.export())); // #6: cifrado en reposo (siempre, ya hay clave)
     // R4-#23: escritura atómica (write-temp + rename) — un corte a mitad de un writeFileSync directo
     // dejaba la base truncada e irrecuperable (un solo byte faltante invalida el auth tag GCM).
-    const tmp = dbPath + '.tmp';
-    fs.writeFileSync(tmp, out, { mode: 0o600 }); // R4-#53: permisos restrictivos (ignorado en Windows)
+    tmp = dbPath + '.tmp';
+    const fd = fs.openSync(tmp, 'w', 0o600);
+    try {
+      fs.writeFileSync(fd, out);
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+    // Verify exact bytes, authenticated decryption and SQLite structure before replacing the
+    // last known-good database. A full disk or interrupted write is never acknowledged as durable.
+    const persisted = fs.readFileSync(tmp);
+    const expectedHash = crypto.createHash('sha256').update(out).digest();
+    const persistedHash = crypto.createHash('sha256').update(persisted).digest();
+    if (!crypto.timingSafeEqual(expectedHash, persistedHash)) {
+      throw new Error('La verificación del archivo temporal no coincide');
+    }
+    const verifier = new db.constructor(_decryptDb(persisted));
+    try {
+      const integrity = verifier.exec('PRAGMA integrity_check');
+      if (String(integrity?.[0]?.values?.[0]?.[0]).toLowerCase() !== 'ok') {
+        throw new Error('El archivo temporal no supera integrity_check');
+      }
+    } finally {
+      verifier.close();
+    }
     // R4-#23/#55: respaldar el anterior SOLO si ya estaba cifrado. Nunca respaldar una DB legacy en
     // texto plano (filtraría justo los datos que estamos migrando a cifrado).
     try {
@@ -159,7 +187,9 @@ function _persist() {
       console.log('[DB] Migración a cifrado en reposo completada (legacy plano reemplazado).');
     }
   } catch (e) {
+    try { if (tmp && fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (_) { /* best effort */ }
     console.error('[DB] persist error:', e.message);
+    if (throwOnError) throw e;
   }
 }
 
@@ -208,6 +238,12 @@ function saveSoon() {
 // ── Migrations ──────────────────────────────────────────
 
 function runMigrations() {
+  db.run(`CREATE TABLE IF NOT EXISTS schema_migrations (
+    version    INTEGER PRIMARY KEY,
+    name       TEXT NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+  )`);
+
   // Key-value config store
   db.run(`CREATE TABLE IF NOT EXISTS app_config (
     key   TEXT PRIMARY KEY,
@@ -239,6 +275,8 @@ function runMigrations() {
     image_url               TEXT,
     thumbnail_url           TEXT,
     active                  INTEGER DEFAULT 1,
+    client_id               INTEGER,
+    sucursal_id             INTEGER,
     synced_at               TEXT
   )`);
   db.run('CREATE INDEX IF NOT EXISTS idx_products_code   ON products(code)');
@@ -574,7 +612,245 @@ function runMigrations() {
   }
 
   // R4-#57: cerrar la ventana de tokens JWT legacy en texto plano (instalaciones previas al cifrado).
+  applyMigration(9, 'bundle_sync_v2', () => {
+    const columns = [
+      'ALTER TABLE products ADD COLUMN stock_tracked INTEGER DEFAULT 1',
+      'ALTER TABLE products ADD COLUMN cloud_quantity INTEGER DEFAULT 0',
+      'ALTER TABLE products ADD COLUMN catalog_revision INTEGER DEFAULT 0',
+      'ALTER TABLE products ADD COLUMN price_proof TEXT',
+      'ALTER TABLE sale_items ADD COLUMN catalog_revision INTEGER',
+      'ALTER TABLE sale_items ADD COLUMN price_proof TEXT',
+    ];
+    for (const stmt of columns) {
+      try { db.run(stmt); } catch (_) { /* column already present */ }
+    }
+    // This migration runs exactly once, so every pre-v2 quantity is the last cloud baseline.
+    db.run('UPDATE products SET cloud_quantity=quantity');
+    db.run(`CREATE TABLE IF NOT EXISTS sync_outbox (
+      sequence         INTEGER PRIMARY KEY AUTOINCREMENT,
+      mutation_type    TEXT NOT NULL,
+      source_table     TEXT NOT NULL,
+      source_id        INTEGER NOT NULL,
+      idempotency_key  TEXT NOT NULL,
+      occurred_at      TEXT NOT NULL,
+      payload_json     TEXT,
+      payload_hash     TEXT,
+      state            TEXT NOT NULL DEFAULT 'PENDING',
+      attempts         INTEGER NOT NULL DEFAULT 0,
+      next_retry_at    TEXT,
+      last_error       TEXT,
+      cloud_id         INTEGER,
+      warning_code     TEXT,
+      created_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(mutation_type, idempotency_key)
+    )`);
+    db.run('CREATE INDEX IF NOT EXISTS idx_sync_outbox_due ON sync_outbox(state, next_retry_at, sequence)');
+    db.run(`CREATE TABLE IF NOT EXISTS sync_state (
+      client_id        INTEGER NOT NULL,
+      sucursal_id      INTEGER NOT NULL,
+      device_id        TEXT NOT NULL,
+      cursor           TEXT,
+      protocol_version INTEGER NOT NULL DEFAULT 2,
+      last_success_at  TEXT,
+      last_error       TEXT,
+      PRIMARY KEY(client_id, sucursal_id)
+    )`);
+
+    db.run(`CREATE TRIGGER IF NOT EXISTS trg_outbox_sale_insert
+      AFTER INSERT ON sales WHEN NEW.client_sale_uuid IS NOT NULL AND NEW.sync_status='pending'
+      BEGIN
+        INSERT OR IGNORE INTO sync_outbox
+          (mutation_type, source_table, source_id, idempotency_key, occurred_at)
+        VALUES ('SALE', 'sales', NEW.local_id, NEW.client_sale_uuid, NEW.sale_date);
+      END`);
+    db.run(`CREATE TRIGGER IF NOT EXISTS trg_outbox_return_insert
+      AFTER INSERT ON returns WHEN NEW.client_return_uuid IS NOT NULL AND NEW.sync_status='pending'
+      BEGIN
+        INSERT OR IGNORE INTO sync_outbox
+          (mutation_type, source_table, source_id, idempotency_key, occurred_at)
+        VALUES ('RETURN', 'returns', NEW.local_id, NEW.client_return_uuid, NEW.return_date);
+      END`);
+    db.run(`CREATE TRIGGER IF NOT EXISTS trg_outbox_movement_insert
+      AFTER INSERT ON cash_movements WHEN NEW.client_movement_uuid IS NOT NULL AND NEW.sync_status='pending'
+      BEGIN
+        INSERT OR IGNORE INTO sync_outbox
+          (mutation_type, source_table, source_id, idempotency_key, occurred_at)
+        VALUES ('CASH_MOVEMENT', 'cash_movements', NEW.local_id,
+                NEW.client_movement_uuid, NEW.movement_date);
+      END`);
+    db.run(`CREATE TRIGGER IF NOT EXISTS trg_outbox_session_open
+      AFTER INSERT ON cash_sessions WHEN NEW.client_session_uuid IS NOT NULL AND NEW.sync_status='pending'
+      BEGIN
+        INSERT OR IGNORE INTO sync_outbox
+          (mutation_type, source_table, source_id, idempotency_key, occurred_at)
+        VALUES ('CASH_SESSION_OPEN', 'cash_sessions', NEW.id,
+                NEW.client_session_uuid, COALESCE(NEW.opening_time, datetime('now')));
+      END`);
+    db.run(`CREATE TRIGGER IF NOT EXISTS trg_outbox_session_close
+      AFTER UPDATE OF status ON cash_sessions
+      WHEN NEW.status='CLOSED' AND OLD.status!='CLOSED' AND NEW.client_session_uuid IS NOT NULL
+        AND NEW.sync_status='pending'
+      BEGIN
+        INSERT OR IGNORE INTO sync_outbox
+          (mutation_type, source_table, source_id, idempotency_key, occurred_at)
+        VALUES ('CASH_SESSION_CLOSE', 'cash_sessions', NEW.id,
+                NEW.client_session_uuid || ':close', COALESCE(NEW.closing_time, datetime('now')));
+      END`);
+
+    db.run(`INSERT OR IGNORE INTO sync_outbox
+      (mutation_type, source_table, source_id, idempotency_key, occurred_at)
+      SELECT 'SALE','sales',local_id,client_sale_uuid,sale_date FROM sales
+       WHERE sync_status='pending' AND client_sale_uuid IS NOT NULL`);
+    db.run(`INSERT OR IGNORE INTO sync_outbox
+      (mutation_type, source_table, source_id, idempotency_key, occurred_at)
+      SELECT 'RETURN','returns',local_id,client_return_uuid,return_date FROM returns
+       WHERE sync_status='pending' AND client_return_uuid IS NOT NULL`);
+    db.run(`INSERT OR IGNORE INTO sync_outbox
+      (mutation_type, source_table, source_id, idempotency_key, occurred_at)
+      SELECT 'CASH_MOVEMENT','cash_movements',local_id,client_movement_uuid,movement_date
+        FROM cash_movements WHERE sync_status='pending' AND client_movement_uuid IS NOT NULL`);
+    db.run(`INSERT OR IGNORE INTO sync_outbox
+      (mutation_type, source_table, source_id, idempotency_key, occurred_at)
+      SELECT 'CASH_SESSION_OPEN','cash_sessions',id,client_session_uuid,opening_time
+        FROM cash_sessions WHERE sync_status='pending' AND client_session_uuid IS NOT NULL`);
+    db.run(`INSERT OR IGNORE INTO sync_outbox
+      (mutation_type, source_table, source_id, idempotency_key, occurred_at)
+      SELECT 'CASH_SESSION_CLOSE','cash_sessions',id,client_session_uuid || ':close',closing_time
+        FROM cash_sessions WHERE status='CLOSED' AND sync_status='pending'
+         AND client_session_uuid IS NOT NULL`);
+  });
+
+  // v10: bind every durable mutation to the tenant/branch where it originated.  The source
+  // rows already carried this information since v4, but persisting it on the frozen outbox row
+  // prevents a later login/branch change from ever replaying that payload into another scope.
+  applyMigration(10, 'sync_outbox_scope', () => {
+    for (const stmt of [
+      'ALTER TABLE sync_outbox ADD COLUMN client_id INTEGER',
+      'ALTER TABLE sync_outbox ADD COLUMN sucursal_id INTEGER',
+    ]) {
+      try { db.run(stmt); } catch (_) { /* column already present */ }
+    }
+
+    db.run(`UPDATE sync_outbox SET
+      client_id=CASE source_table
+        WHEN 'sales' THEN (SELECT client_id FROM sales WHERE local_id=source_id)
+        WHEN 'returns' THEN (SELECT client_id FROM returns WHERE local_id=source_id)
+        WHEN 'cash_movements' THEN (SELECT client_id FROM cash_movements WHERE local_id=source_id)
+        WHEN 'cash_sessions' THEN (SELECT client_id FROM cash_sessions WHERE id=source_id)
+        ELSE client_id END,
+      sucursal_id=CASE source_table
+        WHEN 'sales' THEN (SELECT sucursal_id FROM sales WHERE local_id=source_id)
+        WHEN 'returns' THEN (SELECT sucursal_id FROM returns WHERE local_id=source_id)
+        WHEN 'cash_movements' THEN (SELECT sucursal_id FROM cash_movements WHERE local_id=source_id)
+        WHEN 'cash_sessions' THEN (SELECT sucursal_id FROM cash_sessions WHERE id=source_id)
+        ELSE sucursal_id END`);
+
+    for (const trigger of [
+      'trg_outbox_sale_insert', 'trg_outbox_return_insert', 'trg_outbox_movement_insert',
+      'trg_outbox_session_open', 'trg_outbox_session_close',
+    ]) db.run(`DROP TRIGGER IF EXISTS ${trigger}`);
+
+    db.run(`CREATE TRIGGER trg_outbox_sale_insert
+      AFTER INSERT ON sales WHEN NEW.client_sale_uuid IS NOT NULL AND NEW.sync_status='pending'
+      BEGIN
+        INSERT OR IGNORE INTO sync_outbox
+          (mutation_type,source_table,source_id,idempotency_key,occurred_at,client_id,sucursal_id)
+        VALUES ('SALE','sales',NEW.local_id,NEW.client_sale_uuid,NEW.sale_date,
+                NEW.client_id,NEW.sucursal_id);
+      END`);
+    db.run(`CREATE TRIGGER trg_outbox_return_insert
+      AFTER INSERT ON returns WHEN NEW.client_return_uuid IS NOT NULL AND NEW.sync_status='pending'
+      BEGIN
+        INSERT OR IGNORE INTO sync_outbox
+          (mutation_type,source_table,source_id,idempotency_key,occurred_at,client_id,sucursal_id)
+        VALUES ('RETURN','returns',NEW.local_id,NEW.client_return_uuid,NEW.return_date,
+                NEW.client_id,NEW.sucursal_id);
+      END`);
+    db.run(`CREATE TRIGGER trg_outbox_movement_insert
+      AFTER INSERT ON cash_movements WHEN NEW.client_movement_uuid IS NOT NULL AND NEW.sync_status='pending'
+      BEGIN
+        INSERT OR IGNORE INTO sync_outbox
+          (mutation_type,source_table,source_id,idempotency_key,occurred_at,client_id,sucursal_id)
+        VALUES ('CASH_MOVEMENT','cash_movements',NEW.local_id,NEW.client_movement_uuid,
+                NEW.movement_date,NEW.client_id,NEW.sucursal_id);
+      END`);
+    db.run(`CREATE TRIGGER trg_outbox_session_open
+      AFTER INSERT ON cash_sessions WHEN NEW.client_session_uuid IS NOT NULL AND NEW.sync_status='pending'
+      BEGIN
+        INSERT OR IGNORE INTO sync_outbox
+          (mutation_type,source_table,source_id,idempotency_key,occurred_at,client_id,sucursal_id)
+        VALUES ('CASH_SESSION_OPEN','cash_sessions',NEW.id,NEW.client_session_uuid,
+                COALESCE(NEW.opening_time,datetime('now')),NEW.client_id,NEW.sucursal_id);
+      END`);
+    db.run(`CREATE TRIGGER trg_outbox_session_close
+      AFTER UPDATE OF status ON cash_sessions
+      WHEN NEW.status='CLOSED' AND OLD.status!='CLOSED' AND NEW.client_session_uuid IS NOT NULL
+        AND NEW.sync_status='pending'
+      BEGIN
+        INSERT OR IGNORE INTO sync_outbox
+          (mutation_type,source_table,source_id,idempotency_key,occurred_at,client_id,sucursal_id)
+        VALUES ('CASH_SESSION_CLOSE','cash_sessions',NEW.id,NEW.client_session_uuid || ':close',
+                COALESCE(NEW.closing_time,datetime('now')),NEW.client_id,NEW.sucursal_id);
+      END`);
+    db.run(`CREATE INDEX IF NOT EXISTS idx_sync_outbox_scope_due
+      ON sync_outbox(client_id,sucursal_id,state,next_retry_at,sequence)`);
+  });
+
+  // v11: keep branch catalogs side by side. A per-branch v2 cursor can resume without
+  // accidentally showing the products left active by the branch visited immediately before it.
+  applyMigration(11, 'product_catalog_scope', () => {
+    for (const stmt of [
+      'ALTER TABLE products ADD COLUMN client_id INTEGER',
+      'ALTER TABLE products ADD COLUMN sucursal_id INTEGER',
+    ]) {
+      try { db.run(stmt); } catch (_) { /* column already present on fresh databases */ }
+    }
+    db.run(`UPDATE products SET
+      client_id=COALESCE(client_id,(SELECT CAST(value AS INTEGER) FROM app_config WHERE key='client_id')),
+      sucursal_id=COALESCE(sucursal_id,(SELECT CAST(value AS INTEGER) FROM app_config WHERE key='sucursal_id'))`);
+    db.run('CREATE INDEX IF NOT EXISTS idx_products_scope_active ON products(client_id,sucursal_id,active,name)');
+  });
+
+  // v12: an opening which already returned a cloud_id was acknowledged online and must not
+  // remain queued for replay. Old builds marked every local mirror as pending, which could
+  // re-open an existing shift when the server later enabled bundle v2.
+  applyMigration(12, 'acknowledge_online_cash_session_open', () => {
+    db.run(`DELETE FROM sync_outbox
+      WHERE mutation_type='CASH_SESSION_OPEN' AND source_table='cash_sessions'
+        AND source_id IN (SELECT id FROM cash_sessions WHERE status='OPEN' AND cloud_id IS NOT NULL)`);
+    db.run(`UPDATE cash_sessions
+      SET sync_status='synced', synced_at=COALESCE(synced_at,datetime('now','localtime')), sync_error=NULL
+      WHERE status='OPEN' AND cloud_id IS NOT NULL AND sync_status='pending'`);
+  });
+
   _purgeLegacyPlaintextTokens();
+  applyMigration(13, 'snapshot_staging', () => {
+    db.run('ALTER TABLE sync_state ADD COLUMN snapshot_in_progress INTEGER NOT NULL DEFAULT 0');
+    db.run(`CREATE TABLE sync_snapshot_changes (
+      client_id INTEGER NOT NULL, sucursal_id INTEGER NOT NULL,
+      entity_type TEXT NOT NULL, entity_id INTEGER NOT NULL, change_json TEXT NOT NULL,
+      PRIMARY KEY(client_id,sucursal_id,entity_type,entity_id))`);
+    db.run(`CREATE TABLE expense_categories (
+      id INTEGER NOT NULL, client_id INTEGER NOT NULL, sucursal_id INTEGER NOT NULL,
+      name TEXT NOT NULL, active INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY(client_id,sucursal_id,id))`);
+    db.run('ALTER TABLE sales ADD COLUMN local_request_hash TEXT');
+  });
+}
+
+function applyMigration(version, name, migrate) {
+  const exists = get('SELECT version FROM schema_migrations WHERE version=?', [version]);
+  if (exists) return;
+  db.run('BEGIN');
+  try {
+    migrate();
+    db.run('INSERT INTO schema_migrations(version,name) VALUES (?,?)', [version, name]);
+    db.run('COMMIT');
+  } catch (error) {
+    try { db.run('ROLLBACK'); } catch (_) { /* no-op */ }
+    throw error;
+  }
 }
 
 // ── Helper wrappers ──────────────────────────────────────
@@ -617,17 +893,30 @@ function exec(sql) {
 // spans more than one table (sale + items + payments + stock, etc.).
 let _inTx = false;
 function transaction(fn) {
+  if (_maintenanceLocked) throw new Error('El POS se está preparando para actualizar');
   if (_inTx) return fn();
+  // sql.js COMMIT only commits memory. Keep the previous image until the atomic
+  // encrypted file replacement succeeds, so a failed fsync cannot leave a ghost sale.
+  const previous = db.export();
+  db.run('PRAGMA foreign_keys = ON');
+  const previousSequence = Number(get('SELECT COALESCE(MAX(sequence),0) n FROM sync_outbox').n);
   _inTx = true;
   db.run('BEGIN');
   try {
     const result = fn();
+    if (result && typeof result.then === 'function') throw new Error('La transacción debe ser síncrona');
+    require('./sync-bundle-v2').freezeNewMutations(getDb(), previousSequence);
     db.run('COMMIT');
+    _persist(true);
+    db.run('PRAGMA foreign_keys = ON');
     _inTx = false;
-    _persist();
     return result;
   } catch (e) {
     try { db.run('ROLLBACK'); } catch (_) { /* nothing to roll back */ }
+    const Database = db.constructor;
+    db.close();
+    db = new Database(previous);
+    db.run('PRAGMA foreign_keys = ON');
     _inTx = false;
     throw e;
   }
@@ -640,6 +929,21 @@ function getDb() {
   return { all, get, run, exec, transaction, save: _persist };
 }
 
+function setMaintenanceLock(locked) {
+  _maintenanceLocked = !!locked;
+}
+
+function checkDatabaseIntegrity() {
+  if (!db) throw new Error('Database not initialized');
+  const result = get('PRAGMA integrity_check');
+  const value = result ? Object.values(result)[0] : null;
+  if (String(value).toLowerCase() !== 'ok') {
+    throw new Error(`SQLite integrity_check: ${value || 'sin respuesta'}`);
+  }
+  _persist(true);
+  return true;
+}
+
 function closeDatabase() {
   if (_saveTimer) { clearTimeout(_saveTimer); _saveTimer = null; }
   if (db) { _persist(); db.close(); db = null; }
@@ -647,7 +951,7 @@ function closeDatabase() {
 
 function backupDatabaseForUpdate(targetVersion) {
   if (!db) throw new Error('Database not initialized');
-  _persist();
+  _persist(true);
   if (!dbPath || !fs.existsSync(dbPath)) return null;
 
   const safeVersion = String(targetVersion || 'unknown').replace(/[^0-9A-Za-z.-]/g, '_');
@@ -656,15 +960,25 @@ function backupDatabaseForUpdate(targetVersion) {
   const backupPath = path.join(backupDir, `pre-update-${safeVersion}-${Date.now()}.db`);
   fs.copyFileSync(dbPath, backupPath);
 
+  const sourceHash = crypto.createHash('sha256').update(fs.readFileSync(dbPath)).digest('hex');
+  const backupHash = crypto.createHash('sha256').update(fs.readFileSync(backupPath)).digest('hex');
+  if (sourceHash !== backupHash) {
+    try { fs.unlinkSync(backupPath); } catch (_) { /* best effort */ }
+    throw new Error('El backup no coincide con la base local');
+  }
+
   const backups = fs.readdirSync(backupDir)
     .filter((name) => /^pre-update-.*\.db$/.test(name))
     .map((name) => ({ name, mtime: fs.statSync(path.join(backupDir, name)).mtimeMs }))
     .sort((a, b) => b.mtime - a.mtime);
-  for (const stale of backups.slice(2)) {
+  for (const stale of backups.slice(3)) {
     fs.unlinkSync(path.join(backupDir, stale.name));
   }
   console.log('[DB] Pre-update backup created at', backupPath);
   return backupPath;
 }
 
-module.exports = { initDatabase, getDb, closeDatabase, backupDatabaseForUpdate };
+module.exports = {
+  initDatabase, getDb, closeDatabase, backupDatabaseForUpdate,
+  checkDatabaseIntegrity, setMaintenanceLock,
+};

@@ -8,7 +8,7 @@ const { execFileSync } = require('child_process');
 
 const posRoot = path.resolve(__dirname, '..');
 const frontendDir = path.resolve(
-  process.env.NUVENTA_FRONTEND_DIR || path.join(posRoot, '..', 'nuventa-frontend-dev')
+  process.env.NUVENTA_FRONTEND_DIR || path.join(posRoot, '..', 'nuventa-frontend-mp-orders')
 );
 const pnpm = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm';
 

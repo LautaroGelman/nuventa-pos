@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const { once } = require('events');
 const imageCache = require('../src/main/image-cache');
 const { createImageCache } = imageCache;
+const { BundleSyncV2 } = require('../src/main/sync-bundle-v2');
 
 const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00, 0x01, 0xff, 0xd9]);
 const smokeUserData = fs.mkdtempSync(path.join(os.tmpdir(), 'nuventa-electron-smoke-'));
@@ -36,12 +37,32 @@ async function waitIdle(cache) {
 }
 
 async function run() {
-  const sourceServer = http.createServer((_req, res) => {
+  let proxiedInventoryRequest = null;
+  const sourceServer = http.createServer((req, res) => {
+    if (req.url.startsWith('/api/client-panel/1/inventory/page')) {
+      proxiedInventoryRequest = {
+        method: req.method,
+        url: req.url,
+        authorization: req.headers.authorization,
+      };
+      const payload = JSON.stringify({
+        content: [],
+        page: 0,
+        size: 20,
+        totalElements: 23,
+        totalPages: 2,
+        hasNext: true,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) });
+      res.end(payload);
+      return;
+    }
     res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Content-Length': JPEG.length });
     res.end(JPEG);
   });
   await listen(sourceServer);
-  const sourceUrl = `http://127.0.0.1:${sourceServer.address().port}/product.jpg`;
+  const sourceBaseUrl = `http://127.0.0.1:${sourceServer.address().port}`;
+  const sourceUrl = `${sourceBaseUrl}/product.jpg`;
   const options = { allowHttp: true, minFreeDiskBytes: 0, manifestFlushMs: 5 };
   const dependencies = { getUserDataPath: () => smokeUserData };
   let restarted = null;
@@ -51,6 +72,7 @@ async function run() {
   try {
     const { initDatabase, getDb, closeDatabase } = require('../src/main/database');
     const { startLocalServer, stopLocalServer } = require('../src/main/local-server');
+    const { apiClient } = require('../src/main/api-client');
     await initDatabase();
     databaseStarted = true;
     const db = getDb();
@@ -61,7 +83,7 @@ async function run() {
     db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('employee_name', 'Cajero Smoke')");
     db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('roles', '[\"ROLE_CAJERO\"]')");
     db.run("INSERT INTO cash_registers (id, code, name, active, client_id, sucursal_id) VALUES (77, 'SMOKE', 'Caja Smoke', 1, 1, 1)");
-    db.run("INSERT INTO products (id, code, name, price, quantity, active) VALUES (701, 'SALE-SMOKE', 'Producto Smoke', 100, 5, 1)");
+    db.run("INSERT INTO products (id, code, name, price, quantity, active, client_id, sucursal_id) VALUES (701, 'SALE-SMOKE', 'Producto Smoke', 100, 5, 1, 1, 1)");
     db.save();
 
     imageCache.initialize();
@@ -78,6 +100,85 @@ async function run() {
     if (!body.equals(JPEG)) throw new Error('Local image bytes differ from downloaded bytes');
 
     const branchUrl = `http://127.0.0.1:${localPort}/api/client-panel/1/sucursales/1`;
+    db.run("INSERT INTO products (id, code, name, price, quantity, active, client_id, sucursal_id) VALUES (702, 'OTHER-BRANCH', 'Producto Otra Sucursal', 250, 9, 1, 1, 2)");
+    const scopedCatalog = await fetch(`${branchUrl}/items`);
+    assert.equal(scopedCatalog.status, 200);
+    assert.deepEqual((await scopedCatalog.json()).map((product) => product.id), [701]);
+
+    const pagedCatalog = await fetch(`${branchUrl}/items/page?page=0&size=1&q=SALE`);
+    assert.equal(pagedCatalog.status, 200);
+    const pagedCatalogBody = await pagedCatalog.json();
+    assert.equal(pagedCatalogBody.content.length, 1);
+    assert.equal(pagedCatalogBody.content[0].id, 701);
+    assert.equal(pagedCatalogBody.content[0].stockTracked, true);
+    assert.equal(pagedCatalogBody.content[0].sucursalId, 1);
+    assert.equal(pagedCatalogBody.page, 0);
+    assert.equal(pagedCatalogBody.size, 1);
+    assert.equal(pagedCatalogBody.hasNext, false);
+
+    const localBranches = await fetch(
+      `http://127.0.0.1:${localPort}/api/client-panel/1/sucursales`
+    );
+    assert.equal(localBranches.status, 200);
+    assert.deepEqual(await localBranches.json(), [{
+      id: 1,
+      name: '',
+      active: true,
+      clientId: 1,
+    }]);
+
+    // Nombre real para empleados, persistente offline y separado por cliente/sucursal.
+    const savedBranchApi = { getSucursales: apiClient.getSucursales, isOnline: apiClient.isOnline,
+      token: apiClient.token, clientId: apiClient.clientId, sucursalId: apiClient.sucursalId,
+      lastHeartbeatAuthed: apiClient.lastHeartbeatAuthed };
+    Object.assign(apiClient, { token: 'smoke-token', clientId: 1, sucursalId: 1,
+      lastHeartbeatAuthed: true, isOnline: async () => true,
+      getSucursales: async () => [{ id: 1, clientId: 2, name: 'Otro cliente' },
+        { id: 2, name: 'Otra sucursal' }, { id: 1, name: 'Casa Central', active: true }] });
+    const branchEndpoint = `http://127.0.0.1:${localPort}/api/client-panel/1/sucursales`;
+    assert.equal((await (await fetch(branchEndpoint)).json())[0].name, 'Casa Central');
+    apiClient.isOnline = async () => false;
+    closeDatabase(); await initDatabase();
+    for (const role of ['ROLE_CAJERO', 'ROLE_ADMINISTRADOR']) {
+      db.run("UPDATE app_config SET value=? WHERE key='roles'", [JSON.stringify([role])]);
+      const offlineBranches = await fetch(branchEndpoint);
+      assert.equal(offlineBranches.status, 200);
+      assert.deepEqual(await offlineBranches.json(), [{ id: 1, name: 'Casa Central', active: true, clientId: 1 }]);
+    }
+    db.run("UPDATE app_config SET value='2' WHERE key='sucursal_id'");
+    assert.equal((await (await fetch(branchEndpoint)).json())[0].name, '');
+    db.run("UPDATE app_config SET value='1' WHERE key='sucursal_id'");
+    db.run("UPDATE app_config SET value='2' WHERE key='client_id'");
+    assert.equal((await fetch(branchEndpoint)).status, 403);
+    assert.equal((await (await fetch(`http://127.0.0.1:${localPort}/api/client-panel/2/sucursales`)).json())[0].name, '');
+    db.run("UPDATE app_config SET value='1' WHERE key='client_id'");
+    db.run("UPDATE app_config SET value='[\"ROLE_CAJERO\"]' WHERE key='roles'");
+    Object.assign(apiClient, savedBranchApi);
+
+    // El inventario consolidado nunca debe resolverse desde SQLite: incluso para un cajero,
+    // /inventory/page conserva la query y el token al proxearla al backend remoto.
+    const originalBaseUrl = apiClient.baseUrl;
+    apiClient.setBaseUrl(sourceBaseUrl);
+    try {
+      const globalInventory = await fetch(
+        `http://127.0.0.1:${localPort}/api/client-panel/1/inventory/page?page=0&size=20&q=azucar`
+      );
+      assert.equal(globalInventory.status, 200);
+      assert.equal((await globalInventory.json()).totalElements, 23);
+      assert.deepEqual(proxiedInventoryRequest, {
+        method: 'GET',
+        url: '/api/client-panel/1/inventory/page?page=0&size=20&q=azucar',
+        authorization: 'Bearer smoke-token',
+      });
+    } finally {
+      apiClient.setBaseUrl(originalBaseUrl);
+    }
+
+    const crossTenantPage = await fetch(
+      `http://127.0.0.1:${localPort}/api/client-panel/2/sucursales/1/items/page`
+    );
+    assert.equal(crossTenantPage.status, 403);
+
     const salePayloadWithoutRegister = {
       saleDate: '2026-08-09T16:30:00',
       employeeId: 6,
@@ -96,7 +197,6 @@ async function run() {
 
     // Regresión: si la nube informa que la caja está ocupada por otro usuario, el POS no debe
     // crear una sesión local que luego permita vender y termine en conflicto al sincronizar.
-    const { apiClient } = require('../src/main/api-client');
     const originalOnline = apiClient.isOnline;
     const originalGetCurrentSession = apiClient.getCurrentSession;
     const originalOpenSession = apiClient.openSession;
@@ -123,10 +223,14 @@ async function run() {
 
     const reconciledCurrent = await fetch(`${branchUrl}/cash-sessions/current`);
     assert.equal(reconciledCurrent.status, 200);
-    assert.equal(await reconciledCurrent.json(), null);
-    const quarantined = db.get("SELECT status, sync_status FROM cash_sessions WHERE client_session_uuid = 'stale-session-smoke'");
-    assert.equal(quarantined.status, 'FORCED_CLOSE');
-    assert.equal(quarantined.sync_status, 'needs_review');
+    assert.equal((await reconciledCurrent.json()).status, 'OPEN');
+    // La consulta conserva una apertura pendiente. Sólo el uploader puede enviarla,
+    // respetando fecha y dependencias; un GET no reserva una nueva caja remota.
+    const pending = db.get("SELECT status, sync_status FROM cash_sessions WHERE client_session_uuid = 'stale-session-smoke'");
+    assert.equal(pending.status, 'OPEN');
+    assert.equal(pending.sync_status, 'pending');
+    db.run("UPDATE cash_sessions SET status='CLOSED' WHERE client_session_uuid='stale-session-smoke'");
+    db.run("DELETE FROM sync_outbox WHERE source_table='cash_sessions'");
 
     // Regresión: otro cajero puede dejar una fila OPEN local aunque cloud ya haya cerrado ese turno
     // (por ejemplo, si se cerró desde el navegador). Un rechazo cloud debe conservarla; una apertura
@@ -164,6 +268,11 @@ async function run() {
       body: JSON.stringify({ cashRegisterId: 77, initialAmount: 0 }),
     });
     assert.equal(opened.status, 200, await opened.text());
+    const onlineOpenedSession = db.get("SELECT id, sync_status FROM cash_sessions WHERE cloud_id = 9002");
+    assert.equal(onlineOpenedSession.sync_status, 'synced');
+    assert.equal(db.get(`SELECT COUNT(*) AS cnt FROM sync_outbox
+      WHERE source_table='cash_sessions' AND source_id=? AND mutation_type='CASH_SESSION_OPEN'`,
+    [onlineOpenedSession.id]).cnt, 0);
     const reconciledOccupant = db.get("SELECT status, sync_status, sync_error FROM cash_sessions WHERE cloud_id = 9001");
     assert.equal(reconciledOccupant.status, 'FORCED_CLOSE');
     assert.equal(reconciledOccupant.sync_status, 'synced');
@@ -188,6 +297,21 @@ async function run() {
     assert.equal(persistedSale.cash_register_id, 77);
     assert.ok(persistedSale.cash_session_id > 0);
     assert.equal(db.get('SELECT quantity FROM products WHERE id = 701').quantity, 4);
+    const scopedSaleMutation = db.get("SELECT client_id,sucursal_id,state FROM sync_outbox WHERE mutation_type='SALE'");
+    assert.deepEqual(scopedSaleMutation, { client_id: 1, sucursal_id: 1, state: 'PENDING' });
+
+    // El DTO público usa cloud_id. Durante una reconciliación puede quedar una fila histórica
+    // FORCED_CLOSE con el mismo cloud_id que el espejo OPEN actual; la ruta numérica debe elegir el
+    // turno vigente y devolver el mismo detalle rico (ítems + pagos) que el backend.
+    db.run("UPDATE cash_sessions SET cloud_id=9002 WHERE client_session_uuid='stale-session-smoke'");
+    const currentSessionSales = await fetch(`${branchUrl}/cash-sessions/9002/sales`);
+    const currentSessionSalesBody = await currentSessionSales.json();
+    assert.equal(currentSessionSales.status, 200);
+    assert.equal(currentSessionSalesBody.length, 1);
+    assert.equal(currentSessionSalesBody[0].items.length, 1);
+    assert.equal(currentSessionSalesBody[0].items[0].productName, 'Producto Smoke');
+    assert.equal(currentSessionSalesBody[0].payments.length, 1);
+    assert.equal(currentSessionSalesBody[0].payments[0].paymentMethod, 'EFECTIVO');
 
     // Un segundo empleado en el mismo dispositivo no hereda ni puede vender sobre el turno del primero.
     db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('employee_id', '7')");
@@ -321,6 +445,47 @@ async function run() {
     apiClient.token = originalToken;
     apiClient.lastHeartbeatAuthed = originalHeartbeat;
 
+    // Lost ACK: the durable frozen bundle remains retryable, and a DUPLICATE response clears it
+    // without replaying any local commercial effect.
+    const sentBundles = [];
+    const fakeV2Api = {
+      clientId: 1,
+      sucursalId: 1,
+      syncBundle: async (bundle) => {
+        sentBundles.push(bundle);
+        if (sentBundles.length === 1) throw new Error('simulated lost response');
+        return {
+          protocolVersion: 2,
+          serverTime: new Date().toISOString(),
+          results: bundle.mutations.map((mutation, index) => ({
+            idempotencyKey: mutation.idempotencyKey,
+            status: 'DUPLICATE',
+            cloudId: 8_000 + index,
+            result: { id: 8_000 + index, saleId: 155, fiscalDocument: { status: 'PENDING_SYNC' } },
+          })),
+          changes: [{
+            sequence: 1, entityType: 'PRODUCT', entityId: 701, action: 'UPSERT', revision: 4,
+            payload: { id: 701, code: 'SALE-SMOKE', name: 'Producto Smoke', price: 100,
+              cloudQuantity: 5, quantity: 5, catalogRevision: 4, priceProof: 'v1.smoke' },
+          }],
+          nextCursor: 'cursor-smoke', hasMore: false, resetRequired: false,
+        };
+      },
+    };
+    const bundleSync = new BundleSyncV2(fakeV2Api);
+    await assert.rejects(bundleSync.sync(), /simulated lost response/);
+    assert.ok(db.get("SELECT COUNT(*) count FROM sync_outbox WHERE state='PENDING'").count > 0);
+    db.run('UPDATE sync_outbox SET next_retry_at=NULL');
+    const bundleResult = await bundleSync.sync();
+    assert.ok(bundleResult.mutationCount > 0);
+    assert.equal(db.get('SELECT COUNT(*) count FROM sync_outbox').count, 0);
+    assert.equal(db.get('SELECT cursor FROM sync_state WHERE client_id=1 AND sucursal_id=1').cursor, 'cursor-smoke');
+    assert.equal(db.get('SELECT quantity FROM products WHERE id=701').quantity, 5);
+    assert.deepEqual(
+      sentBundles[0].mutations.map((mutation) => mutation.payloadHash),
+      sentBundles[1].mutations.map((mutation) => mutation.payloadHash),
+    );
+
     await imageCache.shutdown();
     await stopLocalServer();
     localServerStarted = false;
@@ -333,7 +498,7 @@ async function run() {
     }
     await restarted.shutdown();
     restarted = null;
-    console.log('[SMOKE] Electron image cache + venta/caja local: OK');
+    console.log('[SMOKE] Electron inventario remoto + imagen/venta/caja local: OK');
   } finally {
     await close(sourceServer);
     if (localServerStarted) {

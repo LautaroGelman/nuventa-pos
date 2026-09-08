@@ -9,6 +9,23 @@
 
 ## 1. Qué hace este servidor
 
+Ventas completadas, devoluciones y gastos se confirman localmente antes de sincronizar. El POST de
+venta admite `clientSaleUuid`: repetir el mismo contenido devuelve la venta existente; cambiar el
+contenido con esa clave devuelve 409. Pagos, cantidades y totales se validan antes de mutar la base.
+`GET /expense-categories` usa el catálogo local de la sucursal. Cajas disponibles e inventario de
+todas las sucursales priorizan la nube; el inventario de la sucursal activa funciona offline.
+
+Una venta `PENDING` para cobro integrado se crea online y requiere una apertura ya sincronizada:
+la orden de pago necesita el ID remoto. Nunca se guarda esa reserva como una venta completada local.
+Consultar el turno actual no envía una apertura pendiente; esa tarea pertenece al outbox ordenado.
+El cierre y su preview incluyen gastos/devoluciones, y un fondo de cero se conserva como cero.
+
+`GET /sucursales` para empleados consulta el nombre real en el endpoint remoto existente y guarda
+metadatos en `app_config` bajo `branch_metadata:<clientId>:<sucursalId>`. Sólo devuelve la sucursal
+activa; durante un corte reutiliza su último nombre conocido, incluso después de reiniciar. No hay
+migración de schema. Una respuesta de otra identidad no actualiza la caché. El propietario conserva
+su consulta remota de la lista completa; no se modifican permisos del backend.
+
 `startLocalServer()` ([local-server.js:1371](../src/main/local-server.js#L1371)) levanta un
 `http.Server` en `127.0.0.1` con un **puerto aleatorio** (`listen(0)`). Resuelve dos tipos de
 tráfico:
@@ -42,8 +59,8 @@ El backend expone rutas **branch-scoped**:
 4. **Gate cloud-only** (`isCloudOnlyRoute`): si la ruta es cloud-only y hay `clientId`:
    - Admin/Dueño → `proxyToCloud`.
    - Otro rol → **403**.
-5. **Búsqueda multi-sucursal** (`/inventory/all-branches`, `/products/all-branches`) → siempre
-   `proxyToCloud` (cualquier rol).
+5. **Búsqueda multi-sucursal** (`GET /inventory/page`) → siempre `proxyToCloud` (cualquier rol).
+   El catálogo de la sucursal activa (`GET /items/page`) se resuelve localmente.
 6. **Creación de productos** (`POST /items`): si el rol no puede gestionar inventario → **403**.
 7. **`routeRequest`** ([local-server.js:1311](../src/main/local-server.js#L1311)) → busca handler:
    - Handler local encontrado → lo ejecuta.
@@ -107,6 +124,16 @@ DTOs en **camelCase** (forma que espera el frontend). Columnas en snake_case (ve
 |---------------|---------|----------------|
 | `POST /sales` | [local-server.js](../src/main/local-server.js) | Exige un turno abierto con caja válida. Crea venta `pending`, inserta `sale_items`/`sale_payments`/`sale_promotion_discounts`, **decrementa stock** (salvo `no_code`/`weighable`) y suma el efectivo a `expected_amount`. Persiste `cashRegisterId`; si un frontend anterior lo omite, lo hereda de la sesión local abierta para que la nube pueda vincularla al sincronizar. Responde 201 con `offlineCreated:true`. |
 | `GET /sales` | [:495](../src/main/local-server.js#L495) | Ventas de **hoy** (LIMIT 100). |
+
+### Comprobantes para impresión
+
+`GET /arca/invoices/:id/pdf` y `GET /arca/invoices/by-sale/:id` consultan la nube
+también para el cajero. Exigen que el cliente y sucursal de la ruta coincidan con la
+sesión activa; mantienen los controles de autenticación del proxy. El PDF se transmite
+como bytes, sin convertirlo a texto. La consulta por venta exige un ID remoto.
+
+La creación local de ventas y su respuesta idempotente incluyen nombres de productos,
+pagos, descuento y total para imprimir el ticket sin depender de otra consulta online.
 
 ### Cajas registradoras
 
@@ -227,3 +254,34 @@ cubre el instante previo a que el caché offline termine de descargar el objeto.
 - [synchronization.md](synchronization.md) — destino en la nube de los registros `pending`.
 - [architecture.md](architecture.md) — cómo llega el request hasta acá.
 </content>
+
+## Actualización del estado de caja (7/9/2026)
+
+`current` y `registers/availability` conservan prioridad online y responden con `Cache-Control:
+no-store`. Descartan respuestas recibidas tras cambiar la identidad. Una apertura local pendiente
+no se muestra libre por una lectura remota anterior a su envío. El GET del turno vuelve a leer
+SQLite después de esperar la nube, evitando reactivar un cierre confirmado mientras tanto.
+
+Cerrar una caja emite `cash-session-closed` después del commit durable, también al devolver un
+cierre ya existente por ID. El main solicita un ciclo urgente de sincronización, sin esperar la
+hora ni el backoff acumulado. Los rechazos de validación o persistencia no emiten ese evento.
+# Tutorial guiado
+
+`GET` y `PUT /api/client-panel/{clientId}/onboarding` se reenvían a la nube
+para todos los roles del comercio, incluidos cajero e inventario. Se verifica
+el comercio activo antes del proxy y se conserva el JWT del usuario. El backend
+resuelve los permisos y el progreso individual. Requiere conexión y no crea
+mutaciones en el outbox. Regresión: `cashier_tutorial_progress_is_scoped_and_never_queued`.
+
+
+## Precios mayoristas (8/9/2026)
+
+`GET /api/client-panel/{clientId}/inventory/wholesale-prices` consulta la nube también
+para cajeros e inventario, verificando el comercio activo y conservando el JWT.
+No genera operaciones en el outbox. Sin conexión no hay referencias mayoristas vigentes.
+
+`POST /promotions/apply` verifica cliente y sucursal activos. Con conexión autenticada
+usa el cálculo del backend para combos, precios mayoristas y promociones por medio de pago.
+Sin conexión conserva el subtotal sin promociones; no existe aún un catálogo de promociones
+sincronizado para calcularlas offline. Regresión:
+`cashier_wholesale_prices_and_online_calculation_are_scoped`.

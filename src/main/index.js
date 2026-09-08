@@ -6,12 +6,14 @@
 // Watches sessionStorage for auth tokens → saves locally for
 // offline auth + sync.
 // ============================================================
-const { app, BrowserWindow, ipcMain, dialog, session, Menu, net, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, session, Menu, net, shell, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs   = require('fs');
-const { pathToFileURL } = require('url');
 const configStore = require('./config-store');
-const { initDatabase, getDb, closeDatabase, backupDatabaseForUpdate } = require('./database');
+const {
+  initDatabase, getDb, closeDatabase, backupDatabaseForUpdate,
+  checkDatabaseIntegrity, setMaintenanceLock,
+} = require('./database');
 const { apiClient } = require('./api-client');
 const { authService } = require('./auth-service');
 const { SyncService } = require('./sync-service');
@@ -20,16 +22,20 @@ const { encryptToken, decryptToken } = require('./token-crypto');
 const imageCache = require('./image-cache');
 const { createUpdateService } = require('./update-service');
 const { isMicrosoftStoreDistribution } = require('./distribution');
+const { PrinterService } = require('./printer-service');
 
 let mainWindow = null;
 let syncService = null;
 let updateService = null;
+let printerService = null;
 let isOffline = false;
 let onlineCheckTimer = null;
 let tokenWatcherTimer = null;
 let lastKnownToken = null;
 let loggedOut = false; // set on logout to block token re-injection on next page load
 let sessionRevocationInProgress = false;
+let installQuitInProgress = false;
+let displaySleepBlockerId = null;
 
 // ── Enlarge cache ────────────────────────────────────────
 app.commandLine.appendSwitch('disk-cache-size', '524288000'); // 500 MB
@@ -96,7 +102,7 @@ async function applyActiveBranch(value) {
   }
 
   console.log(`[AUTH] Sucursal activa actualizada: ${sucursalId}`);
-  if (syncService) await syncService.forceSync();
+  if (syncService) await syncService.refreshCatalog();
   return { success: true, sucursalId };
 }
 
@@ -216,6 +222,73 @@ function stopOnlineCheck() {
   if (onlineCheckTimer) { clearInterval(onlineCheckTimer); onlineCheckTimer = null; }
 }
 
+async function requestUpdateInstallation() {
+  if (!updateService) return { success: false };
+  return updateService.confirmInstallation(async () => {
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: 'info', title: 'Actualizar Nuventa POS',
+      message: 'Seleccioná “Sí” o “Aceptar” en el aviso de Windows',
+      detail: 'Nuventa se reiniciará para actualizarse.',
+      buttons: ['Continuar y actualizar', 'Ahora no'],
+      defaultId: 1, cancelId: 1, noLink: true,
+    });
+    return result.response === 0;
+  }, installReadyUpdate);
+}
+
+async function confirmLogoutWithUpdate() {
+  if (!updateService) return true;
+  return updateService.confirmLogout(async () => {
+    const result = await dialog.showMessageBox(mainWindow, {
+      type: 'info', title: 'Actualización pendiente',
+      message: 'Actualizá el programa antes de cerrar el programa',
+      buttons: ['Actualizar ahora', 'Cerrar sesión de todos modos', 'Cancelar'],
+      defaultId: 0, cancelId: 2, noLink: true,
+    });
+    return result.response;
+  }, requestUpdateInstallation);
+}
+
+async function installReadyUpdate() {
+  if (!updateService || updateService.getStatus().state !== 'ready') {
+    return { success: false, error: 'No hay una actualización lista para instalar.' };
+  }
+  setMaintenanceLock(true);
+  const prepared = await updateService.prepareInstallation(async (version) => {
+    if (syncService) {
+      syncService.stop();
+      if (!await syncService.drain(3000)) throw new Error('Todavía hay una sincronización en curso. Reintentá en unos segundos.');
+    }
+    checkDatabaseIntegrity();
+    const backup = backupDatabaseForUpdate(version);
+    if (!backup) throw new Error('No se pudo crear el backup previo');
+  });
+  if (!prepared) {
+    setMaintenanceLock(false);
+    if (syncService && apiClient.token) syncService.start();
+    return { success: false, error: updateService.getStatus().error };
+  }
+
+  stopOnlineCheck();
+  stopTokenWatcher();
+  // Keep the paused local services available until Electron actually quits.
+  // An emitted installer error can then recover without changing the local port.
+  installQuitInProgress = true;
+  if (updateService.installDownloadedUpdate()) return { success: true };
+  installQuitInProgress = false;
+
+  // No service was destroyed: release maintenance and resume on launch failure.
+  try {
+    setMaintenanceLock(false);
+    startOnlineCheck();
+    startTokenWatcher();
+    if (syncService && apiClient.token) syncService.start();
+  } catch (error) {
+    console.error('[UPDATER] No se pudo reabrir el POS después del fallo:', error.message);
+  }
+  return { success: false, error: updateService.getStatus().error || 'No se pudo iniciar el instalador.' };
+}
+
 // ── API Interception ─────────────────────────────────────
 // Uses Electron's protocol.handle() to transparently proxy
 // /api/* requests to the backend. The browser sees responses
@@ -321,6 +394,13 @@ function stopTokenWatcher() {
 }
 
 async function handleTokenCaptured(token) {
+  // Offline password validation already established both identity stores. It must
+  // never extend the remote authorization grace period or overwrite the cloud JWT.
+  const offlineUser = authService.getCurrentUser();
+  if (offlineUser?.offlineMode && offlineUser.token === token) {
+    if (syncService) syncService.start();
+    return;
+  }
   const jwt = parseJwt(token);
   if (!jwt) {
     console.warn('[TOKEN] Failed to parse JWT');
@@ -560,21 +640,59 @@ function registerIpcHandlers() {
     return updateService.checkForUpdates({ force: true });
   });
 
+  ipcMain.handle('updater:retry', async (event) => {
+    if (!isTrustedSender(event) || !updateService) return { state: 'disabled' };
+    return updateService.retry();
+  });
+
+  ipcMain.handle('updater:install', async (event) => {
+    if (!isTrustedSender(event) || !updateService) return { success: false, error: 'Origen no autorizado.' };
+    return requestUpdateInstallation();
+  });
+
+  ipcMain.handle('updater:before-logout', async (event) => {
+    if (!isTrustedSender(event)) return false;
+    return confirmLogoutWithUpdate();
+  });
+
+  ipcMain.handle('updater:defer', (event) => {
+    if (!isTrustedSender(event) || !updateService) return { state: 'disabled' };
+    return updateService.defer();
+  });
+
+  ipcMain.handle('updater:open-store', async (event) => {
+    if (!isTrustedSender(event)) return false;
+    await shell.openExternal('ms-windows-store://pdp/?productid=9MWQ82CX7C5B');
+    return true;
+  });
+
+  ipcMain.handle('diagnostics:export', async (event) => {
+    if (!isTrustedSender(event)) return { success: false, error: 'Origen no autorizado.' };
+    const sync = syncService ? syncService.getStatus() : {};
+    const update = updateService ? updateService.diagnostics() : {};
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Exportar diagnóstico de Nuventa POS',
+      defaultPath: `nuventa-pos-diagnostico-${new Date().toISOString().slice(0, 10)}.json`,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (result.canceled || !result.filePath) return { success: false, canceled: true };
+    fs.writeFileSync(result.filePath, JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      appVersion: app.getVersion(),
+      distribution: isMicrosoftStoreDistribution() ? 'store' : 'direct',
+      sync, update,
+    }, null, 2));
+    return { success: true };
+  });
+
   // ── Printer IPC ──────────────────────────────────────────
-  // Permite al cajero ver/elegir la impresora conectada e imprimir el comprobante fiscal
-  // (PDF generado por el backend en el formato configurado) en silencio a esa impresora.
+  // V2 centraliza configuración local, cola, tickets y PDFs en PrinterService.
+  // Los tres handlers legacy se conservan para frontends empacados con una versión anterior.
 
   ipcMain.handle('printer:list', async (event) => {
     if (!isTrustedSender(event)) return []; // D05
     try {
-      const printers = await event.sender.getPrintersAsync();
-      return printers.map((p) => ({
-        name: p.name,
-        displayName: p.displayName || p.name,
-        description: p.description || '',
-        status: p.status,
-        isDefault: p.isDefault,
-      }));
+      return await printerService.listPrinters(event.sender);
     } catch (err) {
       console.error('[PRINTER] list error:', err.message);
       return [];
@@ -583,78 +701,56 @@ function registerIpcHandlers() {
 
   ipcMain.handle('printer:get-selected', (event) => {
     if (!isTrustedSender(event)) return null; // D05
-    return configStore.get('selectedPrinter') || null;
+    return printerService.getConfig().selectedPrinter;
   });
 
   ipcMain.handle('printer:set-selected', (event, name) => {
     if (!isTrustedSender(event)) return false; // D05
-    configStore.set('selectedPrinter', name || null);
-    return true;
+    try {
+      const current = printerService.getConfig();
+      printerService.saveConfig({ ...current, selectedPrinter: name || null });
+      return true;
+    } catch {
+      return false;
+    }
   });
 
-  // Imprime un PDF (bytes) en silencio. Carga el PDF en una ventana oculta (visor de Chromium) y
-  // lo manda a la impresora indicada en opts.deviceName, o a la seleccionada, o a la por defecto.
+  ipcMain.handle('printer:get-state', async (event) => {
+    if (!isTrustedSender(event)) return { version: 2, readiness: 'UNAUTHORIZED', printers: [] };
+    return printerService.getState(event.sender);
+  });
+
+  ipcMain.handle('printer:open-settings', async (event) => {
+    if (!isTrustedSender(event)) return { success: false, error: 'Origen no autorizado.' };
+    try {
+      await shell.openExternal('ms-settings:printers');
+      return { success: true };
+    } catch (error) { return { success: false, error: error.message }; }
+  });
+
+  ipcMain.handle('printer:save-config', async (event, config) => {
+    if (!isTrustedSender(event)) return { success: false, error: 'Origen no autorizado.' };
+    try {
+      if (config?.selectedPrinter) {
+        const printers = await printerService.listPrinters(event.sender);
+        if (!printers.some((p) => p.name === config.selectedPrinter)) {
+          return { success: false, error: 'La impresora ya no aparece en Windows. Volvé a buscarla.' };
+        }
+      }
+      return { success: true, config: printerService.saveConfig(config) };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
   ipcMain.handle('printer:print-pdf', async (event, bytes, opts = {}) => {
     if (!isTrustedSender(event)) return { success: false, error: 'Origen no autorizado.' }; // D05
+    return printerService.printPdf(event.sender, bytes, opts);
+  });
 
-    // R4-#64: validar forma/tamaño de `bytes` y el deviceName ANTES de escribir el temp / imprimir.
-    // `bytes` viene del FE remoto vía contextBridge; el gate de origen no valida el CONTENIDO del payload.
-    let buffer;
-    if (bytes instanceof Uint8Array || Buffer.isBuffer(bytes)) buffer = Buffer.from(bytes);
-    else if (bytes instanceof ArrayBuffer) buffer = Buffer.from(new Uint8Array(bytes));
-    else return { success: false, error: 'Formato de PDF inválido.' };
-    if (buffer.length === 0 || buffer.length > 20 * 1024 * 1024) {
-      return { success: false, error: 'PDF vacío o demasiado grande (máx 20MB).' };
-    }
-    if (opts && opts.deviceName != null && (typeof opts.deviceName !== 'string' || opts.deviceName.length > 200)) {
-      return { success: false, error: 'Impresora inválida.' };
-    }
-
-    const deviceName = opts.deviceName || configStore.get('selectedPrinter') || '';
-    let tmpPath = null;
-    let printWin = null;
-    try {
-      tmpPath = path.join(app.getPath('temp'), `nuventa-print-${Date.now()}.pdf`);
-      fs.writeFileSync(tmpPath, buffer);
-
-      printWin = new BrowserWindow({
-        show: false,
-        webPreferences: { plugins: true, contextIsolation: true, nodeIntegration: false },
-      });
-      await printWin.loadURL(pathToFileURL(tmpPath).href);
-
-      const result = await new Promise((resolve) => {
-        // pequeño delay para que el visor de PDF termine de renderizar antes de imprimir
-        setTimeout(() => {
-          if (!printWin || printWin.isDestroyed()) {
-            resolve({ success: false, error: 'Ventana de impresión cerrada' });
-            return;
-          }
-          printWin.webContents.print(
-            {
-              silent: true,
-              printBackground: true,
-              deviceName: deviceName || undefined,
-              margins: { marginType: 'none' },
-            },
-            (success, failureReason) => resolve({ success, error: success ? null : failureReason })
-          );
-        }, 400);
-      });
-
-      return result;
-    } catch (err) {
-      console.error('[PRINTER] print-pdf error:', err.message);
-      return { success: false, error: err.message };
-    } finally {
-      // dar tiempo al spooler a tomar el trabajo antes de destruir la ventana / borrar el temp
-      if (printWin && !printWin.isDestroyed()) {
-        setTimeout(() => { try { printWin.destroy(); } catch {} }, 3000);
-      }
-      if (tmpPath) {
-        setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch {} }, 6000);
-      }
-    }
+  ipcMain.handle('printer:print-ticket', async (event, ticket, opts = {}) => {
+    if (!isTrustedSender(event)) return { success: false, state: 'FAILED', error: 'Origen no autorizado.' };
+    return printerService.printTicket(event.sender, ticket, opts);
   });
 }
 
@@ -792,7 +888,8 @@ function buildMenu() {
         {
           label: 'Cerrar sesión',
           accelerator: 'CmdOrCtrl+Shift+L',
-          click: () => {
+          click: async () => {
+            if (!await confirmLogoutWithUpdate()) return;
             // Clear DB token FIRST so the preload won't re-inject it
             // when the page navigates to /login.
             loggedOut = true;
@@ -827,8 +924,12 @@ function buildMenu() {
           click: () => {
             const db = getDb();
             const pendingSales = db.get("SELECT COUNT(*) as cnt FROM sales WHERE sync_status = 'pending'");
-            const productCount = db.get("SELECT COUNT(*) as cnt FROM products WHERE active = 1");
-            const registerCount = db.get("SELECT COUNT(*) as cnt FROM cash_registers");
+            const activeClientId = Number(db.get("SELECT value FROM app_config WHERE key='client_id'")?.value || 0);
+            const activeBranchId = Number(db.get("SELECT value FROM app_config WHERE key='sucursal_id'")?.value || 0);
+            const productCount = db.get(`SELECT COUNT(*) as cnt FROM products
+              WHERE active = 1 AND client_id = ? AND sucursal_id = ?`, [activeClientId, activeBranchId]);
+            const registerCount = db.get(`SELECT COUNT(*) as cnt FROM cash_registers
+              WHERE client_id = ? AND sucursal_id = ?`, [activeClientId, activeBranchId]);
             const lastSync = db.get("SELECT value FROM app_config WHERE key = 'last_product_sync'");
             const userCount = db.get("SELECT COUNT(*) as cnt FROM users");
             const imgStats = imageCache.getStats();
@@ -855,6 +956,10 @@ function buildMenu() {
           },
         },
         { type: 'separator' },
+        {
+          label: 'Buscar actualizaciones',
+          click: () => { if (updateService) void updateService.requestNotification(); },
+        },
         {
           label: 'Recargar página',
           accelerator: 'CmdOrCtrl+R',
@@ -905,11 +1010,27 @@ if (!gotSingleInstanceLock) {
 app.whenReady().then(async () => {
   if (!gotSingleInstanceLock) return; // 2da instancia: ya se llamó app.quit(); no inicializar nada
 
+  // Keep the checkout screen awake for the entire app lifetime, including when minimized.
+  // This is a process-scoped request, not a permanent change to the Windows power plan.
+  displaySleepBlockerId = powerSaveBlocker.start('prevent-display-sleep');
+
   // 1. Config
   configStore.loadConfig();
 
   // 2. Initialize SQLite database
   await initDatabase();
+
+  // 2a. Initialize the Windows-spooler printing service before registering IPC.
+  printerService = new PrinterService({
+    configStore,
+    BrowserWindow,
+    getTempPath: () => app.getPath('temp'),
+    emitStatus: (status) => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('printer:job-status', status);
+      }
+    },
+  });
 
   // 2b. Initialize image cache (product images for offline display)
   imageCache.initialize();
@@ -928,7 +1049,7 @@ app.whenReady().then(async () => {
 
   loginEvents.on('login-success', (result) => {
     sessionRevocationInProgress = false;
-    console.log(`[MAIN] Login: ${result.user?.email} (offline=${result.isOffline})`);
+    console.log(`[MAIN] Login completed (offline=${result.isOffline})`);
     // apiClient was already configured by authService inside the login flow.
     // Start background sync only when we are online.
     if (syncService && !syncService._timer && !result.isOffline) {
@@ -1021,66 +1142,81 @@ app.whenReady().then(async () => {
     }
   });
   syncService.on('products-updated', () => { console.log('[MAIN] Products updated from sync'); });
+  loginEvents.on('local-mutation', () => {
+    if (syncService) syncService.notifyLocalMutation();
+  });
+  loginEvents.on('cash-session-closed', () => {
+    if (syncService) void syncService.forceSync({ urgent: true });
+  });
   if (apiClient.token) syncService.start();
 
   // The Microsoft Store owns updates for MSIX installs. Direct NSIS installs
   // keep using electron-updater through the Nuventa R2 release feed.
-  updateService = createUpdateService();
+  const configuredUpdateFeed = process.env.NUVENTA_POS_UPDATE_FEED_URL
+    || configStore.get('updateFeedUrl');
+  const updateRequestHeaders = {};
+  if (process.env.CF_ACCESS_CLIENT_ID && process.env.CF_ACCESS_CLIENT_SECRET) {
+    updateRequestHeaders['CF-Access-Client-Id'] = process.env.CF_ACCESS_CLIENT_ID;
+    updateRequestHeaders['CF-Access-Client-Secret'] = process.env.CF_ACCESS_CLIENT_SECRET;
+  }
+  updateService = createUpdateService({
+    feedUrl: configuredUpdateFeed,
+    requestHeaders: updateRequestHeaders,
+  });
   updateService.on('status', (status) => {
+    if (status.state === 'recoverable-error' && installQuitInProgress) {
+      installQuitInProgress = false;
+      setMaintenanceLock(false);
+      startOnlineCheck();
+      startTokenWatcher();
+      if (syncService && apiClient.token) syncService.start();
+    }
     console.log(`[UPDATER] ${status.state}${status.availableVersion ? ` v${status.availableVersion}` : ''}`);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send('updater:status', status);
     }
   });
-  updateService.start({ disabled: configStore.isDev() || isMicrosoftStoreDistribution() });
+  updateService.start({
+    disabled: configStore.isDev(),
+    managedByStore: isMicrosoftStoreDistribution(),
+  });
 
   // 10. Load the app — web frontend (online) or fallback (offline)
   //     Cached token is injected by the preload script.
   await loadApp();
 });
 
+app.on('will-quit', () => {
+  if (displaySleepBlockerId !== null) {
+    powerSaveBlocker.stop(displaySleepBlockerId);
+    displaySleepBlockerId = null;
+  }
+});
+
 app.on('window-all-closed', async () => {
-  let updatePrepared = false;
+  if (installQuitInProgress) return;
   if (updateService) updateService.stop();
   stopOnlineCheck();
   stopTokenWatcher();
 
-  // Antes de borrar el token o cerrar SQLite, ejecutar SIEMPRE el sync final y consultar el feed.
-  // Ambas tareas son independientes y corren juntas para no alargar innecesariamente el cierre.
-  // Si el chequeo encuentra una versión, espera su descarga (con límite interno) para poder
-  // respaldar la base e instalarla en este mismo apagado.
-  await Promise.all([
-    syncService
-      ? syncService.syncBeforeShutdown().catch((err) => {
-          console.error('[SYNC] No se pudo completar la sincronización final:', err.message);
-        })
-      : Promise.resolve(),
-    updateService
-      ? updateService.checkForUpdatesBeforeShutdown().then((status) => {
-          if (status.shutdownWaitTimedOut) {
-            console.warn('[UPDATER] La descarga no terminó dentro del tiempo de cierre; se reanudará al iniciar.');
-          }
-        }).catch((err) => {
-          console.error('[UPDATER] No se pudo completar el chequeo final:', err.message);
-        })
-      : Promise.resolve(),
-  ]);
+  // El cierre normal nunca inicia red ni espera una descarga. Sólo concede hasta 3 s a una
+  // sincronización que ya estaba en vuelo; el outbox ya está persistido.
+  if (syncService) await syncService.syncBeforeShutdown().catch((err) => {
+    console.error('[SYNC] No se pudo drenar la sincronización en curso:', err.message);
+  });
 
   // Clear cached token on exit — user must log in again on next launch.
   try {
     const db = getDb();
     db.run("DELETE FROM app_config WHERE key = 'auth_token'");
     db.run("DELETE FROM app_config WHERE key = 'roles'"); // R4-#37: roles no deben sobrevivir a otro login
-    db.run("UPDATE users SET last_token = NULL"); // A10: que el login offline no reuse el token tras cerrar la app
+    // Keep the encrypted cloud credential behind the next password login. The UI
+    // session is cleared above; no user is automatically logged in on restart.
     db.save();
-    if (updateService) {
-      updatePrepared = await updateService.prepareForShutdown(backupDatabaseForUpdate);
-    }
   } catch { /* best-effort */ }
   await imageCache.shutdown();
   await stopLocalServer();
   closeDatabase();
-  if (updatePrepared && updateService.installDownloadedUpdate()) return;
   app.quit();
 });
 

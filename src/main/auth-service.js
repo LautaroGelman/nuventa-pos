@@ -238,11 +238,13 @@ class AuthService {
     // máximo de ambos para no bloquear a un cajero cuyo equipo sí estuvo online (vía sync) aunque no
     // haya vuelto a loguearse en 7 días.
     const cfgOnline = db.get("SELECT value FROM app_config WHERE key = 'last_online_at'");
-    const onlineCandidates = [localUser.last_online_at, cfgOnline && cfgOnline.value]
+    const sameEmployee = Number(db.get("SELECT value FROM app_config WHERE key='employee_id'")?.value) === Number(localUser.employee_id);
+    const onlineCandidates = [localUser.last_online_at, sameEmployee && cfgOnline && cfgOnline.value]
       .filter(Boolean)
       .map((s) => new Date(s).getTime())
       .filter((t) => !Number.isNaN(t));
     const lastOnlineMs = onlineCandidates.length ? Math.max(...onlineCandidates) : null;
+    if (!lastOnlineMs) return { success: false, isOffline: true, error: 'Conectate para validar el primer ingreso de este usuario.' };
     if (lastOnlineMs) {
       const daysSinceOnline = (Date.now() - lastOnlineMs) / (1000 * 60 * 60 * 24);
       if (daysSinceOnline > OFFLINE_MAX_DAYS) {
@@ -292,7 +294,24 @@ class AuthService {
     }
 
     // Configure API client with cached data
-    const token = localUser.last_token ? decryptToken(localUser.last_token) : 'offline-session-token';
+    const roles = this._parseRoles(localUser.roles);
+    const cached = localUser.last_token ? decryptToken(localUser.last_token) : null;
+    let cachedExpiry = 0;
+    try { cachedExpiry = JSON.parse(Buffer.from(cached.split('.')[1], 'base64url')).exp * 1000; } catch { /* no remote credential */ }
+    const expiresAt = lastOnlineMs + OFFLINE_MAX_DAYS * 86400000;
+    const token = cachedExpiry > Date.now() ? cached : require('./offline-session').createOfflineSession({
+      sub: email, clientId: localUser.client_id, sucursalId: localUser.sucursal_id,
+      employeeId: localUser.employee_id, employeeName: localUser.employee_name,
+      clientName: localUser.client_name, roles,
+    }, expiresAt);
+    db.transaction(() => {
+      for (const [key, value] of Object.entries({ auth_token: encryptToken(token),
+        client_id: localUser.client_id, sucursal_id: localUser.sucursal_id,
+        employee_id: localUser.employee_id, employee_name: localUser.employee_name,
+        client_name: localUser.client_name, roles: JSON.stringify(roles) })) {
+        db.run('INSERT OR REPLACE INTO app_config(key,value) VALUES (?,?)', [key, String(value ?? '')]);
+      }
+    });
     apiClient.setAuth({
       token,
       clientId: localUser.client_id,
@@ -300,7 +319,6 @@ class AuthService {
       employeeId: localUser.employee_id,
     });
 
-    const roles = this._parseRoles(localUser.roles);
     this._currentUser = {
       email,
       token,
@@ -493,7 +511,7 @@ class AuthService {
     set('cloud_session_revoked', '0'); // A02: un login online exitoso limpia el bloqueo por revocación
 
     db.save();
-    console.log('[AUTH] User saved locally:', email);
+    console.log('[AUTH] User credentials refreshed locally');
   }
 
   /**
@@ -596,8 +614,10 @@ class AuthService {
         // próximo sync OK. Mismo patrón que sync-service.js (db.transaction commitea y persiste a
         // disco de forma síncrona; un error revierte todo).
         db.transaction(() => {
-          // Deactivate all existing products (for this branch's data)
-          db.exec('UPDATE products SET active = 0');
+          // Deactivate only this branch. Other branch snapshots remain cached and are selected
+          // by scope, so changing branches cannot expose or destroy another catalog.
+          db.run('UPDATE products SET active = 0 WHERE client_id = ? AND sucursal_id = ?',
+            [clientId, sucursalId]);
 
           for (const p of products) {
             // R7-#52: si el producto tiene movimientos locales pendientes, NO pisar su quantity
@@ -606,15 +626,21 @@ class AuthService {
             // R7-#53: incluir subcategory_ids en INSERT y ON CONFLICT; antes se omitía y cada login
             // dejaba los productos con subcategory_ids='[]' (default) hasta el primer sync horario.
             db.run(`
-              INSERT INTO products (id, code, no_code, name, description, price, cost,
-                cost_derived, quantity, low_stock_threshold, reorder_qty_default,
+              INSERT INTO products (id, code, no_code, stock_tracked, weighable, max_unit_price,
+                name, description, price, cost, cost_derived, quantity, cloud_quantity,
+                catalog_revision, price_proof, low_stock_threshold, reorder_qty_default,
                 preferred_provider_id, preferred_provider_name,
-                category_ids, subcategory_ids, provider_ids, image_url, thumbnail_url, active, synced_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+                category_ids, subcategory_ids, provider_ids, image_url, thumbnail_url,
+                client_id, sucursal_id, active, synced_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
               ON CONFLICT(id) DO UPDATE SET
-                code=excluded.code, no_code=excluded.no_code, name=excluded.name,
+                code=excluded.code, no_code=excluded.no_code,
+                stock_tracked=excluded.stock_tracked, weighable=excluded.weighable,
+                max_unit_price=excluded.max_unit_price, name=excluded.name,
                 description=excluded.description, price=excluded.price, cost=excluded.cost,
                 cost_derived=excluded.cost_derived, ${qtyClause}
+                cloud_quantity=excluded.cloud_quantity,
+                catalog_revision=excluded.catalog_revision, price_proof=excluded.price_proof,
                 low_stock_threshold=excluded.low_stock_threshold,
                 reorder_qty_default=excluded.reorder_qty_default,
                 preferred_provider_id=excluded.preferred_provider_id,
@@ -622,15 +648,19 @@ class AuthService {
                 category_ids=excluded.category_ids, subcategory_ids=excluded.subcategory_ids,
                 provider_ids=excluded.provider_ids,
                 image_url=excluded.image_url, thumbnail_url=excluded.thumbnail_url,
+                client_id=excluded.client_id, sucursal_id=excluded.sucursal_id,
                 active=1, synced_at=excluded.synced_at
             `, [
-              p.id, p.code || null, p.noCode ? 1 : 0, p.name, p.description || null,
-              p.price, p.cost || null, p.costDerived ? 1 : 0, p.quantity ?? 0,
+              p.id, p.code || null, p.noCode ? 1 : 0, p.stockTracked === false ? 0 : 1,
+              p.weighable ? 1 : 0, p.maxUnitPrice ?? null, p.name, p.description || null,
+              p.price, p.cost || null, p.costDerived ? 1 : 0, p.quantity ?? 0, p.quantity ?? 0,
+              Number(p.catalogRevision || 0), p.priceProof || null,
               p.lowStockThreshold || null, p.reorderQtyDefault || null,
               p.preferredProviderId || null, p.preferredProviderName || null,
               JSON.stringify(p.categoryIds || []), JSON.stringify(p.subcategoryIds || []),
               JSON.stringify(p.providerIds || []),
               p.imageUrl || null, p.thumbnailUrl || null,
+              clientId, sucursalId,
               now,
             ]);
           }
@@ -715,7 +745,10 @@ class AuthService {
    */
   async _checkOnline() {
     try {
-      return await apiClient.isOnline();
+      // This runs before credentials are submitted. It is only a reachability
+      // check: a cached/expired token must not raise the global "session closed"
+      // dialog while the user is trying to log in again.
+      return await apiClient.isOnline({ notifyRevocation: false });
     } catch {
       return false;
     }

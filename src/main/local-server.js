@@ -86,7 +86,7 @@ function computeExpectedInCash(db, session) {
     [session.id]
   );
   for (const m of movements) {
-    if (m.type === 'INJECTION') injectionsTotal += m.amount;
+    if (m.type === 'INJECTION' || m.type === 'ADJUSTMENT') injectionsTotal += m.amount;
     else if (m.type === 'WITHDRAWAL' || m.type === 'EXPENSE') withdrawalsTotal += m.amount;
   }
   const cashRefundsRow = db.get(
@@ -300,6 +300,19 @@ function parseRoute(pathname) {
     };
   }
 
+  // Client-scoped routes such as /api/client-panel/:clientId/sucursales and
+  // /api/client-panel/:clientId/inventory/page. Without this branch they were
+  // treated as top-level routes, so cashier requests could neither be served
+  // from SQLite nor safely proxied while online.
+  const clientMatch = path.match(/\/api\/client-panel\/(\d+)\/(.+)/);
+  if (clientMatch) {
+    return {
+      clientId: Number(clientMatch[1]),
+      sucursalId: null,
+      subpath: '/' + clientMatch[2],
+    };
+  }
+
   // Auth and other top-level routes
   return { clientId: null, sucursalId: null, subpath: path };
 }
@@ -352,8 +365,17 @@ function getOwnedCashSessionByAnyId(db, sessionId) {
        AND client_id = ?
        AND sucursal_id = ?
        AND employee_id = ?
+     ORDER BY
+       CASE
+         WHEN cloud_id = ? AND status = 'OPEN' THEN 0
+         WHEN id = ? THEN 1
+         WHEN cloud_id = ? THEN 2
+         ELSE 3
+       END,
+       opening_time DESC,
+       id DESC
      LIMIT 1
-  `, [id, id, scope.clientId, scope.sucursalId, scope.employeeId]);
+  `, [id, id, scope.clientId, scope.sucursalId, scope.employeeId, id, id, id]);
 }
 
 /**
@@ -450,19 +472,20 @@ function linkOrMirrorCloudCashSession(db, localSession, cloudSession) {
   const scope = getCurrentCashScope(db);
   if (!scope || !cloudSession || cloudSession.status !== 'OPEN') return null;
 
-  const sameRegister = localSession
-    && String(localSession.cash_register_id) === String(cloudSession.cashRegisterId);
+  const sameIdentity = localSession?.client_session_uuid
+    && localSession.client_session_uuid === cloudSession.clientSessionUuid;
   const sameCloudSession = localSession?.cloud_id
     && String(localSession.cloud_id) === String(cloudSession.id);
 
-  if (localSession && (sameCloudSession || (!localSession.cloud_id && sameRegister))) {
+  if (localSession && (sameCloudSession || (!localSession.cloud_id && sameIdentity))) {
     db.run(`
       UPDATE cash_sessions
-         SET cloud_id = ?, cash_register_id = ?, cash_register_name = ?,
+         SET cloud_id = ?, client_session_uuid=COALESCE(?,client_session_uuid), cash_register_id = ?, cash_register_name = ?,
              employee_id = ?, employee_name = ?, sync_error = NULL
        WHERE id = ?
     `, [
       cloudSession.id,
+      cloudSession.clientSessionUuid || null,
       cloudSession.cashRegisterId,
       cloudSession.cashRegisterName || localSession.cash_register_name || null,
       scope.employeeId,
@@ -481,9 +504,10 @@ function linkOrMirrorCloudCashSession(db, localSession, cloudSession) {
     INSERT INTO cash_sessions (cloud_id, client_session_uuid, client_id, sucursal_id,
       employee_id, employee_name, status, business_date, opening_time,
       initial_amount, expected_amount, cash_register_id, cash_register_name, sync_status)
-    VALUES (?, NULL, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, 'pending')
+    VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, 'synced')
   `, [
     cloudSession.id,
+    cloudSession.clientSessionUuid || null,
     scope.clientId,
     scope.sucursalId,
     scope.employeeId,
@@ -558,6 +582,11 @@ async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false, 
   if (!token) {
     return jsonResponse(res, 401, { error: 'No hay sesión activa.' });
   }
+  if (require('./offline-session').isOfflineSession(token)) {
+    return jsonResponse(res, 503, { error: 'Esta operación necesita conexión e iniciar sesión online.', offline: true });
+  }
+  const requestToken = apiClient.token;
+  const requestAuthEpoch = apiClient.authEpoch;
 
   // Build the cloud URL from the original request path
   const cloudUrl = `${apiClient.baseUrl}${fullUrl}`;
@@ -599,6 +628,8 @@ async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false, 
     const authWasRevoked = await apiClient.handleAuthFailure(cloudRes.status, {
       path: fullUrl,
       responseBody: responseText,
+      requestToken,
+      requestAuthEpoch,
     });
     if (authWasRevoked) {
       console.warn(`[LOCAL-API] Cloud rejected auth (${cloudRes.status}) for ${method} ${fullUrl} — sesión revocada`);
@@ -824,6 +855,8 @@ handlers['POST /api/auth/logout'] = async (req, res) => {
 
 handlers['GET /items'] = async (req, res, body, route, query) => {
   const db = getDb();
+  const clientId = Number(getConfigVal(db, 'client_id'));
+  const sucursalId = Number(getConfigVal(db, 'sucursal_id'));
   const q = query.q || '';
   let products;
 
@@ -831,12 +864,15 @@ handlers['GET /items'] = async (req, res, body, route, query) => {
     const term = `%${q}%`;
     products = db.all(`
       SELECT * FROM products
-      WHERE active = 1 AND (name LIKE ?1 OR code LIKE ?1 OR description LIKE ?1)
-      ORDER BY CASE WHEN code = ?2 THEN 0 ELSE 1 END, name ASC
+      WHERE active = 1 AND client_id = ?1 AND sucursal_id = ?2
+        AND (name LIKE ?3 OR code LIKE ?3 OR description LIKE ?3)
+      ORDER BY CASE WHEN code = ?4 THEN 0 ELSE 1 END, name ASC
       LIMIT 100
-    `, [term, q]);
+    `, [clientId, sucursalId, term, q]);
   } else {
-    products = db.all('SELECT * FROM products WHERE active = 1 ORDER BY name ASC');
+    products = db.all(`SELECT * FROM products
+      WHERE active = 1 AND client_id = ? AND sucursal_id = ? ORDER BY name ASC`,
+    [clientId, sucursalId]);
   }
 
   // Convert to ProductDto format the web frontend expects
@@ -844,9 +880,112 @@ handlers['GET /items'] = async (req, res, body, route, query) => {
   return jsonResponse(res, 200, dtos);
 };
 
+handlers['GET /items/page'] = async (req, res, body, route, query) => {
+  const db = getDb();
+  const clientId = Number(getConfigVal(db, 'client_id'));
+  const sucursalId = Number(getConfigVal(db, 'sucursal_id'));
+
+  if (route.clientId !== clientId || route.sucursalId !== sucursalId) {
+    return jsonResponse(res, 403, { error: 'Ruta no permitida desde el POS.' });
+  }
+
+  const requestedPage = Number.parseInt(query.page, 10);
+  const requestedSize = Number.parseInt(query.size, 10);
+  const page = Number.isSafeInteger(requestedPage) && requestedPage >= 0 ? requestedPage : 0;
+  const size = Number.isSafeInteger(requestedSize)
+    ? Math.min(100, Math.max(1, requestedSize))
+    : 50;
+  const q = String(query.q || '').trim();
+  const where = ['active = 1', 'client_id = ?1', 'sucursal_id = ?2'];
+  const params = [clientId, sucursalId];
+
+  if (q) {
+    where.push('(name LIKE ?3 OR code LIKE ?3 OR description LIKE ?3)');
+    params.push(`%${q}%`);
+  }
+
+  const whereSql = where.join(' AND ');
+  const total = Number(db.get(
+    `SELECT COUNT(*) AS total FROM products WHERE ${whereSql}`,
+    params
+  )?.total || 0);
+  const offset = page * size;
+  const products = db.all(`
+    SELECT * FROM products
+     WHERE ${whereSql}
+     ORDER BY CASE WHEN code = ?${params.length + 1} THEN 0 ELSE 1 END, name ASC
+     LIMIT ?${params.length + 2} OFFSET ?${params.length + 3}
+  `, [...params, q, size, offset]);
+
+  return jsonResponse(res, 200, {
+    content: products.map((product) => ({
+      ...productToDto(product),
+      sucursalId,
+      sucursalName: `Sucursal #${sucursalId}`,
+    })),
+    page,
+    size,
+    hasNext: offset + products.length < total,
+  });
+};
+
+// The POS only caches the branch selected at login. Returning that branch
+// locally keeps the inventory selector usable offline without pretending that
+// uncached branches are available.
+handlers['GET /sucursales'] = async (req, res, body, route) => {
+  const db = getDb();
+  const clientId = Number(getConfigVal(db, 'client_id'));
+  const sucursalId = Number(getConfigVal(db, 'sucursal_id'));
+  if (route.clientId !== clientId || !Number.isSafeInteger(sucursalId) || sucursalId <= 0) {
+    return jsonResponse(res, 403, { error: 'Ruta no permitida desde el POS.' });
+  }
+  const key = `branch_metadata:${clientId}:${sucursalId}`;
+  const token = apiClient.token;
+  const epoch = apiClient.authEpoch;
+  const sameIdentity = () => token === apiClient.token && epoch === apiClient.authEpoch
+    && clientId === Number(getConfigVal(db, 'client_id'))
+    && sucursalId === Number(getConfigVal(db, 'sucursal_id'));
+  try {
+    if (token && !require('./offline-session').isOfflineSession(token)
+        && Number(apiClient.clientId) === clientId && Number(apiClient.sucursalId) === sucursalId
+        && await apiClient.isOnline() && apiClient.lastHeartbeatAuthed) {
+      if (!sameIdentity()) return jsonResponse(res, 409, { error: 'La sesión cambió durante la consulta.' });
+      const branches = await apiClient.getSucursales();
+      if (!sameIdentity()) return jsonResponse(res, 409, { error: 'La sesión cambió durante la consulta.' });
+      const branch = Array.isArray(branches) ? branches.find((b) => Number(b.id) === sucursalId
+        && (b.clientId == null || Number(b.clientId) === clientId)) : null;
+      if (branch) {
+        const metadata = { id: sucursalId, name: typeof branch.name === 'string' ? branch.name.trim() : '',
+          active: branch.active !== false, clientId };
+        const value = JSON.stringify(metadata);
+        if (getConfigVal(db, key) !== value) db.transaction(() => {
+          db.run('INSERT OR REPLACE INTO app_config(key,value) VALUES (?,?)', [key, value]);
+        });
+      }
+    }
+  } catch (err) {
+    const cloudError = parseCloudHttpError(err);
+    if (cloudError) return jsonResponse(res, cloudError.status, { error: cloudError.message });
+    // Un corte de red conserva el último nombre conocido de esta sucursal.
+  }
+  if (!sameIdentity()) return jsonResponse(res, 409, { error: 'La sesión cambió durante la consulta.' });
+  const cached = safeJsonParse(getConfigVal(db, key), null);
+  return jsonResponse(res, 200, [{
+    id: sucursalId,
+    name: cached?.name || '',
+    active: cached?.active !== false,
+    clientId,
+  }]);
+};
+
 handlers['GET /items/:id'] = async (req, res, body, route, query, pathParams) => {
   const db = getDb();
-  const product = db.get('SELECT * FROM products WHERE id = ? AND active = 1', [pathParams.id]);
+  const product = db.get(`SELECT * FROM products
+    WHERE id = ? AND active = 1 AND client_id = ? AND sucursal_id = ?`, [
+    pathParams.id,
+    Number(getConfigVal(db, 'client_id')),
+    Number(getConfigVal(db, 'sucursal_id')),
+  ]);
   if (!product) return jsonResponse(res, 404, { error: 'Product not found' });
   return jsonResponse(res, 200, productToDto(product));
 };
@@ -858,6 +997,7 @@ function productToDto(p) {
     name: p.name,
     description: p.description || null,
     quantity: p.quantity || 0,
+    stockTracked: p.stock_tracked == null ? true : !!p.stock_tracked,
     cost: p.cost || 0,
     price: p.price,
     lowStockThreshold: p.low_stock_threshold || null,
@@ -935,7 +1075,7 @@ handlers['GET /scale-settings'] = async (req, res, body, route) => {
     const token = getConfigVal(db, 'auth_token');
     const plainToken = token ? decryptToken(token) : null;
 
-    if (plainToken && apiClient.baseUrl) {
+    if (plainToken && !require('./offline-session').isOfflineSession(plainToken) && apiClient.baseUrl) {
       const cloudUrl = `${apiClient.baseUrl}/api/client-panel/${route.clientId}/sucursales/${route.sucursalId}/scale-settings`;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 5000);
@@ -960,15 +1100,42 @@ handlers['GET /scale-settings'] = async (req, res, body, route) => {
     console.log('[LOCAL-API] Scale settings cloud fetch failed, using local cache:', err.message);
   }
 
-  const cached = safeJsonParse(getConfigVal(db, 'scale_settings'), null);
+  const cached = safeJsonParse(getConfigVal(db, `scale_settings:${getConfigVal(db, 'client_id')}:${getConfigVal(db, 'sucursal_id')}`), null);
   jsonResponse(res, 200, cached || SCALE_SETTINGS_DEFAULTS);
 };
 
 // ─── SALES ───────────────────────────────────────────────
 
+handlers['GET /expense-categories'] = async (req, res) => {
+  const db = getDb();
+  const categories = db.all('SELECT id,name,active FROM expense_categories WHERE client_id=? AND sucursal_id=? AND active=1 ORDER BY name',
+    [Number(getConfigVal(db, 'client_id')), Number(getConfigVal(db, 'sucursal_id'))]);
+  return jsonResponse(res, 200, categories.map((c) => ({ ...c, active: !!c.active })));
+};
+
 handlers['POST /sales'] = async (req, res, body) => {
   const db = getDb();
   if (blockIfSessionRevoked(db, res)) return; // A02
+  // Una reserva para un cobro integrado necesita el ID remoto antes de crear la orden.
+  if (body.status === 'PENDING') {
+    const session = getScopedOpenCashSession(db);
+    if (!session?.cloud_id) return jsonResponse(res, 409, { error: 'Sincronizá la apertura de caja antes de iniciar un cobro electrónico.' });
+    return proxyToCloud(req, res, 'POST', req.url, { ...body, clientSessionUuid: session.client_session_uuid });
+  }
+  const { canonicalJson, sha256 } = require('./sync-bundle-v2');
+  const clientSaleUuid = body.clientSaleUuid || crypto.randomUUID();
+  if (!/^[a-zA-Z0-9-]{16,64}$/.test(clientSaleUuid)) return jsonResponse(res, 400, { error: 'Clave de venta inválida.' });
+  const requestHash = sha256(canonicalJson(body));
+  const previous = db.get('SELECT * FROM sales WHERE client_sale_uuid=?', [clientSaleUuid]);
+  if (previous) {
+    if (previous.local_request_hash !== requestHash
+        || Number(previous.client_id) !== Number(getConfigVal(db, 'client_id'))
+        || Number(previous.sucursal_id) !== Number(getConfigVal(db, 'sucursal_id'))) {
+      return jsonResponse(res, 409, { error: 'La clave de venta ya fue usada con otro contenido.' });
+    }
+    return jsonResponse(res, 200, { ...localSaleToDto(db, previous), id: previous.local_id,
+      saleId: previous.local_id, offlineCreated: true, duplicate: true });
+  }
   const {
     saleDate, employeeId, status = 'COMPLETED',
     items = [], payments = [],
@@ -987,7 +1154,10 @@ handlers['POST /sales'] = async (req, res, body) => {
     if (!Number.isInteger(q) || q < 1) {
       return jsonResponse(res, 400, { error: 'Cantidad inválida en un ítem (entero ≥ 1).' });
     }
-    if (it.unitPrice != null && Number(it.unitPrice) < 0) {
+    if (it.productId != null && (!Number.isSafeInteger(Number(it.productId)) || Number(it.productId) <= 0)) {
+      return jsonResponse(res, 400, { error: 'Producto inválido.' });
+    }
+    if (it.unitPrice != null && (!Number.isFinite(Number(it.unitPrice)) || Number(it.unitPrice) < 0)) {
       return jsonResponse(res, 400, { error: 'Precio unitario inválido (no puede ser negativo).' });
     }
     if (it.productId == null && !(it.customName && String(it.customName).trim())) {
@@ -1009,13 +1179,30 @@ handlers['POST /sales'] = async (req, res, body) => {
   // SalesService (clientSaleUuid + unitPrice != null && > 0): si el precio cambió en la nube entre el
   // cacheo del catálogo y el sync, un CAJERO se comería un 403 "no coincide con el de catálogo" y la
   // venta caería en needs_review. Con la separación, el payload de sync queda idéntico al de hoy.
+  const catalogClientId = Number(getConfigVal(db, 'client_id'));
+  const catalogSucursalId = Number(getConfigVal(db, 'sucursal_id'));
+  const requestedProductIds = [...new Set(items
+    .map((item) => item.productId == null ? null : Number(item.productId))
+    .filter((id) => Number.isSafeInteger(id) && id > 0))];
+  const productRows = requestedProductIds.length
+    ? db.all(`SELECT id, name, code, price, stock_tracked, catalog_revision, price_proof
+                FROM products WHERE client_id = ? AND sucursal_id = ? AND active = 1
+                 AND id IN (${requestedProductIds.map(() => '?').join(',')})`,
+    [catalogClientId, catalogSucursalId, ...requestedProductIds])
+    : [];
+  const productsById = new Map(productRows.map((product) => [Number(product.id), product]));
+  const missingProduct = requestedProductIds.find((id) => !productsById.has(id));
+  if (missingProduct != null) {
+    return jsonResponse(res, 409, {
+      error: `El producto ${missingProduct} no pertenece al catálogo activo de esta sucursal. Sincronizá antes de vender.`,
+    });
+  }
+
   const resolvedItems = items.map((item) => {
     // R4-#8: los ítems INDEPENDIENTES (productId null) no están en el catálogo; traen customName y
     // unitPrice propios. El nombre se persiste en product_name — si no, el backend lo exige no-blank
     // al sincronizar y la venta independiente offline quedaba atrapada en needs_review.
-    const prod = item.productId != null
-      ? db.get('SELECT name, code, price FROM products WHERE id = ?', [item.productId])
-      : null;
+    const prod = item.productId != null ? productsById.get(Number(item.productId)) : null;
     const clientUnitPrice = item.unitPrice != null ? Number(item.unitPrice) : null;
     return {
       ...item,
@@ -1023,6 +1210,9 @@ handlers['POST /sales'] = async (req, res, body) => {
         ? prod.name
         : (item.customName && String(item.customName).trim() ? String(item.customName).trim() : 'Producto'),
       productCode: prod ? prod.code : null,
+      stockTracked: prod ? Number(prod.stock_tracked) !== 0 : false,
+      catalogRevision: prod ? Number(prod.catalog_revision || 0) : null,
+      priceProof: prod ? prod.price_proof : null,
       clientUnitPrice,
       unitPrice: clientUnitPrice != null
         ? clientUnitPrice
@@ -1030,11 +1220,25 @@ handlers['POST /sales'] = async (req, res, body) => {
     };
   });
 
-  const totalAmount = round2(finalTotal || resolvedItems.reduce((sum, i) => sum + (i.quantity * i.unitPrice), 0)); // B10
+  const gross = round2(resolvedItems.reduce((sum, i) => sum + (i.quantity * i.unitPrice), 0));
+  const discount = Number(totalDiscount);
+  if (!Number.isFinite(gross) || gross <= 0 || !Number.isFinite(discount) || discount < 0 || discount > round2(gross * 0.99)
+      || (originalTotal != null && (!Number.isFinite(Number(originalTotal)) || Math.abs(Number(originalTotal) - gross) > 0.011))) {
+    return jsonResponse(res, 400, { error: 'Importe o descuento inválido.' });
+  }
+  const totalAmount = round2(gross - discount);
+  if (finalTotal != null && (!Number.isFinite(Number(finalTotal)) || Math.abs(Number(finalTotal) - totalAmount) > 0.011)) {
+    return jsonResponse(res, 400, { error: 'El total no coincide con los ítems y descuentos.' });
+  }
+  const methods = new Set(['EFECTIVO','TRANSFERENCIA','TARJETA_CREDITO','TARJETA_DEBITO','MERCADOPAGO','OTHER']);
+  if (status !== 'COMPLETED' || !Array.isArray(payments) || !payments.length
+      || payments.some((p) => !methods.has(p.paymentMethod) || !Number.isFinite(Number(p.amount)) || Number(p.amount) <= 0)
+      || Math.abs(round2(payments.reduce((sum, p) => sum + Number(p.amount), 0)) - totalAmount) > 0.011) {
+    return jsonResponse(res, 400, { error: 'Los pagos deben ser positivos y coincidir con el total de la venta.' });
+  }
 
   // Clave de idempotencia (C01/F04): se genera UNA vez al crear la venta offline y se persiste.
   // El sync la reenvía en cada reintento; el backend deduplica por (client_id, client_sale_uuid).
-  const clientSaleUuid = crypto.randomUUID();
   // C05: fecha de venta en hora de negocio (Argentina), no UTC, para no caer al día equivocado.
   const saleDateBusiness = toBusinessIso(saleDate);
 
@@ -1053,6 +1257,10 @@ handlers['POST /sales'] = async (req, res, body) => {
     return jsonResponse(res, 409, {
       error: 'El turno abierto no tiene una caja válida asociada. Cerralo y abrí uno nuevo antes de vender.',
     });
+  }
+  if (effectiveCashRegisterId !== Number(currentSession.cash_register_id)
+      || (employeeId != null && Number(employeeId) !== Number(getConfigVal(db, 'employee_id')))) {
+    return jsonResponse(res, 409, { error: 'La venta debe pertenecer al empleado y la caja del turno activo.' });
   }
 
   // P1-08: si la venta offline no trae employeeId, usar el del usuario logueado
@@ -1082,24 +1290,27 @@ handlers['POST /sales'] = async (req, res, body) => {
   ]);
 
   localId = saleResult.lastId;
+  db.run('UPDATE sales SET local_request_hash=? WHERE local_id=?', [requestHash, localId]);
 
   for (const item of resolvedItems) {
     db.run(`
       INSERT INTO sale_items (sale_local_id, product_id, product_name, product_code, quantity,
-        unit_price, client_unit_price)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+        unit_price, client_unit_price, catalog_revision, price_proof)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       localId, item.productId,
       item.productName,
       item.productCode,
       item.quantity, item.unitPrice, item.clientUnitPrice,
+      item.catalogRevision, item.priceProof,
     ]);
 
     // Decrement local stock. Los PESABLES quedan afuera igual que los no_code: se venden por kilo
     // y `quantity` es entero, así que el backend tampoco se los descuenta. Si no se excluyeran acá,
     // el stock local divergiría del de la nube en cada venta pesada.
     db.run(
-      'UPDATE products SET quantity = MAX(0, quantity - ?) WHERE id = ? AND no_code = 0 AND weighable = 0',
+      `UPDATE products SET quantity = quantity - ?
+        WHERE id = ? AND stock_tracked = 1 AND weighable = 0`,
       [item.quantity, item.productId]
     );
   }
@@ -1137,18 +1348,13 @@ handlers['POST /sales'] = async (req, res, body) => {
 
   // Return response matching SaleDto
   return jsonResponse(res, 201, {
+    ...localSaleToDto(db, db.get('SELECT * FROM sales WHERE local_id = ?', [localId])),
     id: localId,
     saleId: localId,
     saleDate: saleDateBusiness,
     totalAmount,
     status,
     offlineCreated: true,
-    items: resolvedItems.map((i, idx) => ({
-      saleItemId: idx + 1,
-      productId: i.productId,
-      quantity: i.quantity,
-      unitPrice: i.unitPrice, // precio efectivo: antes venía undefined en los ítems de catálogo
-    })),
   });
 };
 
@@ -1378,7 +1584,7 @@ handlers['GET /registers'] = async (req, res, body, route, query) => {
     const token = getConfigVal(db, 'auth_token');
     const plainToken = token ? decryptToken(token) : null;
 
-    if (plainToken && apiClient.baseUrl) {
+    if (plainToken && !require('./offline-session').isOfflineSession(plainToken) && apiClient.baseUrl) {
       const cloudUrl = `${apiClient.baseUrl}/api/client-panel/${route.clientId}/sucursales/${route.sucursalId}/registers?onlyActive=${onlyActive}`;
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
@@ -1402,8 +1608,9 @@ handlers['GET /registers'] = async (req, res, body, route, query) => {
   }
 
   // Offline fallback — serve from local cache with warning flag
-  const where = onlyActive ? 'WHERE active = 1' : '';
-  const registers = db.all(`SELECT * FROM cash_registers ${where} ORDER BY name ASC`);
+  const where = onlyActive ? ' AND active = 1' : '';
+  const registers = db.all(`SELECT * FROM cash_registers WHERE client_id=? AND sucursal_id=? ${where} ORDER BY name ASC`,
+    [Number(getConfigVal(db, 'client_id')), Number(getConfigVal(db, 'sucursal_id'))]);
 
   const dtos = registers.map((r) => ({
     id: r.id,
@@ -1423,7 +1630,9 @@ handlers['GET /registers'] = async (req, res, body, route, query) => {
 };
 
 handlers['GET /registers/availability'] = async (req, res, body, route, query) => {
+  res.setHeader('Cache-Control', 'no-store');
   const db = getDb();
+  const requestEpoch = apiClient.authEpoch;
   const onlyActive = query.onlyActive !== 'false';
   const localClientId = getConfigVal(db, 'client_id');
 
@@ -1436,9 +1645,21 @@ handlers['GET /registers/availability'] = async (req, res, body, route, query) =
   try {
     if (apiClient.token && await apiClient.isOnline() && apiClient.lastHeartbeatAuthed) {
       const cloudData = await apiClient.getRegisterAvailability(onlyActive);
+      if (requestEpoch !== apiClient.authEpoch) return jsonResponse(res, 409, { error: 'La sesión cambió durante la consulta de cajas.' });
+      const localPending = db.all(`SELECT * FROM cash_sessions WHERE status='OPEN' AND cloud_id IS NULL
+        AND client_id=? AND sucursal_id=?`, [apiClient.clientId, apiClient.sucursalId]);
       return jsonResponse(res, 200, (Array.isArray(cloudData) ? cloudData : []).map((entry) => ({
         ...entry,
         availabilityVerified: true,
+        // Una apertura offline todavía pendiente no convierte la caja en libre localmente.
+        ...(() => {
+          const pending = localPending.find((s) => String(s.cash_register_id) === String(entry.register?.id ?? entry.id));
+          return pending && !entry.occupied ? {
+            occupied: true, occupiedSessionId: pending.id,
+            occupiedByEmployeeId: pending.employee_id, occupiedByEmployeeName: pending.employee_name,
+            occupiedSince: pending.opening_time, availabilityVerified: false,
+          } : {};
+        })(),
       })));
     }
   } catch (err) {
@@ -1451,9 +1672,11 @@ handlers['GET /registers/availability'] = async (req, res, body, route, query) =
 
   // Sin conexión no afirmamos que una caja esté libre: exponemos el estado local y lo marcamos
   // expresamente como no verificado para que la UI lo comunique al cajero.
-  const where = onlyActive ? 'WHERE active = 1' : '';
-  const registers = db.all(`SELECT * FROM cash_registers ${where} ORDER BY name ASC`);
-  const localOpen = db.all("SELECT * FROM cash_sessions WHERE status = 'OPEN' AND cash_register_id IS NOT NULL");
+  const where = onlyActive ? ' AND active = 1' : '';
+  const registers = db.all(`SELECT * FROM cash_registers WHERE client_id=? AND sucursal_id=? ${where} ORDER BY name ASC`,
+    [Number(getConfigVal(db, 'client_id')), Number(getConfigVal(db, 'sucursal_id'))]);
+  const localOpen = db.all(`SELECT * FROM cash_sessions WHERE status='OPEN' AND cash_register_id IS NOT NULL
+    AND client_id=? AND sucursal_id=?`, [Number(getConfigVal(db, 'client_id')), Number(getConfigVal(db, 'sucursal_id'))]);
   const openByRegister = new Map(localOpen.map((s) => [String(s.cash_register_id), s]));
 
   return jsonResponse(res, 200, registers.map((r) => {
@@ -1484,7 +1707,9 @@ handlers['GET /registers/availability'] = async (req, res, body, route, query) =
 // ─── CASH SESSIONS ───────────────────────────────────────
 
 handlers['GET /cash-sessions/current'] = async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
   const db = getDb();
+  const requestEpoch = apiClient.authEpoch;
   let session = getScopedOpenCashSession(db);
 
   // Online-first: la sesión actual del JWT es la autoridad. Una fila OPEN de otro empleado
@@ -1493,6 +1718,9 @@ handlers['GET /cash-sessions/current'] = async (req, res) => {
   try {
     if (apiClient.token && await apiClient.isOnline() && apiClient.lastHeartbeatAuthed) {
       const cloudSession = await apiClient.getCurrentSession();
+      if (requestEpoch !== apiClient.authEpoch) return jsonResponse(res, 409, { error: 'La sesión cambió durante la consulta de caja.' });
+      // Un cierre puede confirmarse mientras esperamos la nube. Volver a leer antes de reconciliar.
+      session = getScopedOpenCashSession(db);
       if (cloudSession?.status === 'OPEN') {
         const locallyClosed = getScopedClosedCashSessionByCloudId(db, cloudSession.id);
         if (locallyClosed) {
@@ -1518,30 +1746,8 @@ handlers['GET /cash-sessions/current'] = async (req, res) => {
         db.save();
         session = null;
       } else if (session?.client_session_uuid && session?.cash_register_id) {
-        try {
-          const reconciled = await apiClient.openSession({
-            clientSessionUuid: session.client_session_uuid,
-            cashRegisterId: Number(session.cash_register_id),
-            initialAmount: Number(session.initial_amount) || 0,
-          });
-          if (reconciled?.status === 'OPEN') {
-            session = linkOrMirrorCloudCashSession(db, session, reconciled);
-          } else {
-            quarantineLocalCashSession(db, session, 'La sesión idempotente ya no está abierta en la nube.');
-            session = null;
-          }
-          db.save();
-        } catch (err) {
-          const cloudError = parseCloudHttpError(err);
-          if (cloudError && cloudError.status >= 400 && cloudError.status < 500) {
-            quarantineLocalCashSession(db, session, cloudError.message);
-            db.save();
-            session = null;
-          } else if (cloudError) {
-            return jsonResponse(res, cloudError.status, { error: cloudError.message });
-          }
-          // Error de transporte: conservar la sesión offline scoped del mismo empleado.
-        }
+        // El outbox sube la apertura en orden, con su fecha y cierre anterior.
+        // Un GET no debe adelantarla ni crear un turno remoto con otra fecha.
       } else if (session) {
         quarantineLocalCashSession(db, session, 'Sesión local antigua sin identificador para reconciliar.');
         db.save();
@@ -1556,6 +1762,8 @@ handlers['GET /cash-sessions/current'] = async (req, res) => {
     // Sin conectividad real se mantiene el modo offline, siempre scoped al empleado actual.
   }
 
+  if (requestEpoch !== apiClient.authEpoch) return jsonResponse(res, 409, { error: 'La sesión cambió durante la consulta de caja.' });
+  session = getScopedOpenCashSession(db);
   if (!session) return jsonResponse(res, 200, null);
 
   // Calculate sales totals for this session
@@ -1606,32 +1814,34 @@ handlers['GET /cash-sessions/open-preview'] = async (req, res, body, route, quer
   }
 
   const register = cashRegisterId
-    ? db.get('SELECT * FROM cash_registers WHERE id = ?', [cashRegisterId])
+    ? db.get('SELECT * FROM cash_registers WHERE id = ? AND client_id=? AND sucursal_id=?',
+      [cashRegisterId, Number(getConfigVal(db, 'client_id')), Number(getConfigVal(db, 'sucursal_id'))])
     : null;
 
   // Look for previous session on this register
   const prevSession = cashRegisterId
     ? db.get(
-        "SELECT * FROM cash_sessions WHERE cash_register_id = ? AND status = 'CLOSED' ORDER BY closing_time DESC LIMIT 1",
-        [cashRegisterId]
+        "SELECT * FROM cash_sessions WHERE cash_register_id = ? AND client_id=? AND sucursal_id=? AND status = 'CLOSED' ORDER BY closing_time DESC LIMIT 1",
+        [cashRegisterId, localClientId, localSucursalId]
       )
     : null;
 
-  const suggestedAmount = prevSession?.float_left_for_next || register?.default_opening_float || 0;
+  const carry = prevSession?.float_left_for_next ?? prevSession?.counted_amount;
+  const suggestedAmount = carry ?? 0;
 
   return jsonResponse(res, 200, {
     cashRegisterId: cashRegisterId ? Number(cashRegisterId) : null,
     cashRegisterName: register?.name || null,
     cashRegisterCode: register?.code || null,
     defaultOpeningFloat: register?.default_opening_float || 0,
-    hasCarryOver: !!prevSession?.float_left_for_next,
+    hasCarryOver: carry != null,
     previousSessionId: prevSession?.id || null,
     previousEmployeeName: prevSession?.employee_name || null,
     previousClosingTime: prevSession?.closing_time || null,
-    previousFloatLeft: prevSession?.float_left_for_next || null,
-    previousCountedAmount: prevSession?.counted_amount || null,
+    previousFloatLeft: prevSession?.float_left_for_next ?? null,
+    previousCountedAmount: prevSession?.counted_amount ?? null,
     suggestedAmount,
-    suggestedAmountSource: prevSession?.float_left_for_next ? 'CARRY_OVER' : 'DEFAULT_FLOAT',
+    suggestedAmountSource: carry != null ? 'CARRY_OVER' : 'ZERO',
     requireOpeningConfirmation: false,
     allowOpeningDiscrepancy: true,
     discrepancyThreshold: null,
@@ -1651,7 +1861,8 @@ handlers['POST /cash-sessions/open'] = async (req, res, body) => {
   }
 
   const register = cashRegisterId
-    ? db.get('SELECT * FROM cash_registers WHERE id = ?', [cashRegisterId])
+    ? db.get('SELECT * FROM cash_registers WHERE id = ? AND client_id=? AND sucursal_id=?',
+      [cashRegisterId, Number(getConfigVal(db, 'client_id')), Number(getConfigVal(db, 'sucursal_id'))])
     : null;
 
   if (!cashRegisterId || !register || !register.active) {
@@ -1714,35 +1925,40 @@ handlers['POST /cash-sessions/open'] = async (req, res, body) => {
       error: `La caja seleccionada ya está ocupada localmente${occupant.employee_name ? ` por ${occupant.employee_name}` : ''}. Conectate para verificar su estado antes de abrirla.`,
     });
   }
-  if (cloudSession) {
-    for (const occupant of localRegisterOccupants) {
-      reconcileStaleRegisterOccupant(db, occupant);
-    }
+  const previousClosed = db.get(`SELECT * FROM cash_sessions WHERE client_id=? AND sucursal_id=?
+    AND cash_register_id=? AND status IN ('CLOSED','FORCED_CLOSE') ORDER BY closing_time DESC,id DESC LIMIT 1`,
+  [scope.clientId, scope.sucursalId, cashRegisterId]);
+  const inherited = previousClosed?.float_left_for_next ?? previousClosed?.counted_amount;
+  const amount = cloudSession?.initialAmount ?? inherited ?? requestedAmount ?? 0;
+  if (!Number.isFinite(Number(amount)) || Number(amount) < 0) return jsonResponse(res, 400, { error: 'El fondo inicial debe ser un número no negativo.' });
+  if (!cloudSession && inherited == null && Number(amount) > 0 && !isAdminOrOwner()) {
+    return jsonResponse(res, 403, { error: 'El aporte inicial requiere propietario o administrador.' });
   }
 
-  const amount = cloudSession?.initialAmount
-    ?? requestedAmount
-    ?? register.default_opening_float
-    ?? 0;
-
-  const result = db.run(`
-    INSERT INTO cash_sessions (cloud_id, client_session_uuid, client_id, sucursal_id, employee_id, employee_name,
-      status, business_date, opening_time, initial_amount, expected_amount,
-      cash_register_id, cash_register_name, cash_register_code, sync_status)
-    VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, 'pending')
-  `, [
-    cloudSession?.id || null,
-    clientSessionUuid,
-    Number(getConfigVal(db, 'client_id')),
-    Number(getConfigVal(db, 'sucursal_id')),
-    employeeId, employeeName,
-    today, now, Number(amount), Number(amount),
-    cashRegisterId || null,
-    register?.name || null,
-    register?.code || null,
-  ]);
-
-  db.save();
+  const result = db.transaction(() => {
+    if (cloudSession) {
+      for (const occupant of localRegisterOccupants) {
+        reconcileStaleRegisterOccupant(db, occupant);
+      }
+    }
+    return db.run(`
+      INSERT INTO cash_sessions (cloud_id, client_session_uuid, client_id, sucursal_id, employee_id, employee_name,
+        status, business_date, opening_time, initial_amount, expected_amount,
+        cash_register_id, cash_register_name, cash_register_code, sync_status)
+      VALUES (?, ?, ?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [
+      cloudSession?.id || null,
+      clientSessionUuid,
+      Number(getConfigVal(db, 'client_id')),
+      Number(getConfigVal(db, 'sucursal_id')),
+      employeeId, employeeName,
+      today, now, Number(amount), Number(amount),
+      cashRegisterId || null,
+      register?.name || null,
+      register?.code || null,
+      cloudSession ? 'synced' : 'pending',
+    ]);
+  });
 
   return jsonResponse(res, 200, {
     id: result.lastId,
@@ -1784,7 +2000,10 @@ handlers['POST /cash-sessions/close'] = async (req, res, body, route, query, pat
       && String(session.id) !== String(requestedId)
       && String(session.cloud_id) !== String(requestedId)) {
     const alreadyClosed = getScopedClosedCashSessionByAnyId(db, requestedId);
-    if (alreadyClosed) return jsonResponse(res, 200, sessionToDto(alreadyClosed));
+    if (alreadyClosed) {
+      loginEvents.emit('cash-session-closed');
+      return jsonResponse(res, 200, sessionToDto(alreadyClosed));
+    }
     return jsonResponse(res, 409, {
       error: 'La sesión solicitada ya no es la sesión de caja abierta actual.',
     });
@@ -1793,27 +2012,36 @@ handlers['POST /cash-sessions/close'] = async (req, res, body, route, query, pat
   if (!session) {
     if (hasRequestedId) {
       const alreadyClosed = getScopedClosedCashSessionByAnyId(db, requestedId);
-      if (alreadyClosed) return jsonResponse(res, 200, sessionToDto(alreadyClosed));
+      if (alreadyClosed) {
+        loginEvents.emit('cash-session-closed');
+        return jsonResponse(res, 200, sessionToDto(alreadyClosed));
+      }
     }
     return jsonResponse(res, 400, { error: 'No hay sesión de caja abierta.' });
   }
 
   const now = businessNowIso();
-  const counted = Number(countedAmount) || 0;
+  const counted = Number(countedAmount);
+  const floatLeft = Number(floatLeftForNext ?? 0);
+  if (countedAmount == null || !Number.isFinite(counted) || counted < 0
+      || !Number.isFinite(floatLeft) || floatLeft < 0 || floatLeft > counted) {
+    return jsonResponse(res, 400, { error: 'El conteo y el fondo deben ser no negativos; el fondo no puede superar lo contado.' });
+  }
   // B03: el esperado se recalcula SOLO con efectivo al cerrar (la columna expected_amount sumaba
   // ventas con tarjeta/transferencia → faltantes ficticios). Persistimos el recálculo.
   const expectedInCash = computeExpectedInCash(db, session);
   const diff = counted - expectedInCash;
 
-  db.run(`
-    UPDATE cash_sessions SET
-      status = 'CLOSED', closing_time = ?, counted_amount = ?,
-      expected_amount = ?, difference = ?, closing_note = ?, float_left_for_next = ?,
-      sync_status = 'pending'
-    WHERE id = ?
-  `, [now, counted, expectedInCash, diff, note || null, floatLeftForNext || null, session.id]);
+  db.transaction(() => db.run(`
+      UPDATE cash_sessions SET
+        status = 'CLOSED', closing_time = ?, counted_amount = ?,
+        expected_amount = ?, difference = ?, closing_note = ?, float_left_for_next = ?,
+        sync_status = 'pending'
+      WHERE id = ?
+    `, [now, counted, expectedInCash, diff, note || null, floatLeft, session.id]));
 
-  db.save();
+  // El cierre ya es durable: enviar ventas/movimientos y luego el arqueo sin esperar la hora.
+  loginEvents.emit('cash-session-closed');
 
   return jsonResponse(res, 200, {
     ...sessionToDto(session),
@@ -1823,7 +2051,7 @@ handlers['POST /cash-sessions/close'] = async (req, res, body, route, query, pat
     expectedAmount: expectedInCash,
     difference: diff,
     closingNote: note || null,
-    floatLeftForNext: floatLeftForNext || null,
+    floatLeftForNext: floatLeft,
   });
 };
 
@@ -1865,7 +2093,7 @@ handlers['GET /cash-sessions/:id/close-preview'] = async (req, res, body, route,
   let injectionsTotal = 0;
   let withdrawalsTotal = 0;
   for (const m of movements) {
-    if (m.type === 'INJECTION') injectionsTotal += m.amount;
+    if (m.type === 'INJECTION' || m.type === 'ADJUSTMENT') injectionsTotal += m.amount;
     else if (m.type === 'WITHDRAWAL' || m.type === 'EXPENSE') withdrawalsTotal += m.amount;
   }
 
@@ -1895,7 +2123,7 @@ handlers['GET /cash-sessions/:id/close-preview'] = async (req, res, body, route,
     initialAmount: session.initial_amount,
     blindCountEnabled: false,
     discrepancyThreshold: null,
-    suggestedFloatForNext: 0,
+    suggestedFloatForNext: session.initial_amount,
     salesByPaymentMethod: salesByMethod,
     totalSales,
     cashSales,
@@ -1941,21 +2169,53 @@ handlers['GET /cash-sessions/:id/sales'] = async (req, res, body, route, query, 
   }
 
   const sales = db.all(
-    'SELECT s.*, sp.payment_method FROM sales s LEFT JOIN sale_payments sp ON sp.sale_local_id = s.local_id WHERE s.cash_session_id = ? ORDER BY s.created_at DESC',
+    'SELECT * FROM sales WHERE cash_session_id = ? ORDER BY created_at DESC, local_id DESC',
     [sessionId]
   );
 
-  const result = sales.map((s) => ({
-    id: s.cloud_id || s.local_id,
-    createdAt: s.sale_date,
-    paymentMethod: s.payment_method || 'EFECTIVO',
-    total: s.total_amount,
-    totalAmount: s.total_amount,
-    ticketNumber: null,
-    customerName: null,
-    fecha: s.sale_date,
-    isMixedPayment: false,
-  }));
+  // Match SessionSaleItemDto from the cloud endpoint. Returning only the sale header made the
+  // Electron history lose its item and mixed-payment detail even when the row itself was found.
+  const result = sales.map((s) => {
+    const items = db.all(
+      'SELECT * FROM sale_items WHERE sale_local_id = ? ORDER BY id',
+      [s.local_id]
+    ).map((item) => ({
+      saleItemId: item.id,
+      productId: item.product_id,
+      productName: item.product_name,
+      quantity: item.quantity,
+      unitPrice: item.unit_price,
+    }));
+    const payments = db.all(
+      'SELECT * FROM sale_payments WHERE sale_local_id = ? ORDER BY id',
+      [s.local_id]
+    ).map((payment) => ({
+      id: payment.id,
+      paymentMethod: payment.payment_method,
+      amount: payment.amount,
+      externalId: payment.external_ref || null,
+      mercadoPagoPaymentType: null,
+      mercadoPagoPaymentMethodId: null,
+      mercadoPagoInstallments: null,
+      mercadoPagoInstallmentsCost: null,
+    }));
+    const methods = [...new Set(payments.map((payment) => payment.paymentMethod).filter(Boolean))];
+    return {
+      id: s.cloud_id || s.local_id,
+      createdAt: s.sale_date,
+      paymentMethod: methods.length ? methods.join(' + ') : 'EFECTIVO',
+      total: s.total_amount,
+      totalAmount: s.total_amount,
+      ticketNumber: null,
+      customerName: null,
+      items,
+      payments,
+      fecha: s.sale_date,
+      isMixedPayment: methods.length > 1,
+      provisionalPointPayment: false,
+      pointExternalPaymentId: null,
+    };
+  });
 
   return jsonResponse(res, 200, result);
 };
@@ -2029,7 +2289,16 @@ handlers['GET /cash-sessions/:id/expenses'] = async (req, res, body, route, quer
 
 // ─── PROMOTIONS ──────────────────────────────────────────
 
-handlers['POST /promotions/apply'] = async (req, res, body) => {
+handlers['POST /promotions/apply'] = async (req, res, body, route) => {
+  const db = getDb();
+  if (Number(route.clientId) !== Number(getConfigVal(db, 'client_id'))
+      || Number(route.sucursalId) !== Number(getConfigVal(db, 'sucursal_id'))) {
+    return jsonResponse(res, 403, { error: 'La promoción debe corresponder a la sucursal activa.' });
+  }
+  // Use the same authoritative calculator as the web while connected.
+  if (apiClient.token && await apiClient.isOnline() && apiClient.lastHeartbeatAuthed) {
+    return proxyToCloud(req, res, 'POST', req.url, body);
+  }
   // No promotions offline — return original totals
   const originalSubtotal = (body.items || []).reduce(
     (sum, i) => sum + (i.quantity || 0) * (i.unitPrice || 0), 0
@@ -2059,7 +2328,8 @@ handlers['POST /returns'] = async (req, res, body, route) => {
     items = [],
   } = body;
 
-  if (!saleId || items.length === 0) {
+  if (!saleId || !Array.isArray(items) || items.length === 0
+      || !['CASH','TRANSFER','MERCADOPAGO'].includes(refundMethod)) {
     return jsonResponse(res, 400, { error: 'Se requiere saleId y al menos un ítem.' });
   }
 
@@ -2119,7 +2389,8 @@ handlers['POST /returns'] = async (req, res, body, route) => {
     if (!si) {
       return jsonResponse(res, 400, { error: `Ítem de venta no encontrado: ${ri.saleItemId || ri.productId}` });
     }
-    const qty = ri.quantity || 1;
+    const qty = Number(ri.quantity);
+    if (!Number.isSafeInteger(qty) || qty <= 0) return jsonResponse(res, 400, { error: 'La cantidad a devolver debe ser un entero positivo.' });
     // Cantidad ya devuelta de este sale_item (devoluciones previas + lo acumulado en ESTE request,
     // por si el mismo ítem viene repetido en `items`).
     const prevReturned = alreadyReturned.get(si.id) || 0;
@@ -2333,7 +2604,7 @@ handlers['POST /expenses'] = async (req, res, body) => {
     expenseCategoryId, categoryRef,
   } = body;
 
-  if (!amount || amount <= 0) {
+  if (!Number.isFinite(Number(amount)) || Number(amount) === 0 || (type !== 'ADJUSTMENT' && Number(amount) < 0)) {
     return jsonResponse(res, 400, { error: 'El monto debe ser mayor a cero.' });
   }
 
@@ -2347,6 +2618,7 @@ handlers['POST /expenses'] = async (req, res, body) => {
   // categoría de gasto. El front manda `categoryRef`: numérico = id de categoría (para EXPENSE),
   // o `SYS::...` para inyección/retiro/ajuste (sin categoría). Persistimos ambos para el sync.
   const movementNote = (note !== undefined && note !== null) ? note : (description || null);
+  if (movementNote != null && String(movementNote).length > 400) return jsonResponse(res, 400, { error: 'La nota no puede superar 400 caracteres.' });
   let categoryId = null;
   if (expenseCategoryId != null && !Number.isNaN(Number(expenseCategoryId))) {
     categoryId = Number(expenseCategoryId);
@@ -2359,7 +2631,13 @@ handlers['POST /expenses'] = async (req, res, body) => {
     return jsonResponse(res, 400, { error: `Tipo inválido. Valores permitidos: ${validTypes.join(', ')}` });
   }
 
+  if (type === 'EXPENSE' && !db.get('SELECT id FROM expense_categories WHERE id=? AND client_id=? AND sucursal_id=? AND active=1',
+    [categoryId, Number(getConfigVal(db, 'client_id')), Number(getConfigVal(db, 'sucursal_id'))])) {
+    return jsonResponse(res, 400, { error: 'Seleccioná una categoría de gasto vigente de esta sucursal.' });
+  }
+
   const currentSession = getScopedOpenCashSession(db);
+  if (scope === 'SESSION' && !currentSession) return jsonResponse(res, 409, { error: 'Abrí un turno para registrar el movimiento.' });
 
   const employeeId = Number(getConfigVal(db, 'employee_id'));
   const employeeName = getConfigVal(db, 'employee_name') || '';
@@ -2368,35 +2646,36 @@ handlers['POST /expenses'] = async (req, res, body) => {
   // Clave de idempotencia (C01/C04): se persiste y el sync la reenvía en cada reintento.
   const clientMovementUuid = crypto.randomUUID();
 
-  const result = db.run(`
-    INSERT INTO cash_movements (client_movement_uuid, type, scope, amount, description,
-      expense_category_id, employee_id, employee_name, cash_session_id, movement_date, client_id, sucursal_id, sync_status)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
-  `, [
-    clientMovementUuid,
-    type, scope, Number(amount), movementNote,
-    categoryId,
-    employeeId, employeeName,
-    currentSession ? currentSession.id : null, now,
-    Number(getConfigVal(db, 'client_id')) || null, Number(getConfigVal(db, 'sucursal_id')) || null, // R4-#40
-  ]);
+  const result = db.transaction(() => {
+    const inserted = db.run(`
+      INSERT INTO cash_movements (client_movement_uuid, type, scope, amount, description,
+        expense_category_id, employee_id, employee_name, cash_session_id, movement_date, client_id, sucursal_id, sync_status)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending')
+    `, [
+      clientMovementUuid,
+      type, scope, Number(amount), movementNote,
+      categoryId,
+      employeeId, employeeName,
+      currentSession ? currentSession.id : null, now,
+      Number(getConfigVal(db, 'client_id')) || null, Number(getConfigVal(db, 'sucursal_id')) || null, // R4-#40
+    ]);
 
-  // Update cash session expected amount
-  if (currentSession && scope === 'SESSION') {
-    if (type === 'INJECTION') {
-      db.run(
-        'UPDATE cash_sessions SET expected_amount = expected_amount + ? WHERE id = ?',
-        [Number(amount), currentSession.id]
-      );
-    } else if (type === 'WITHDRAWAL' || type === 'EXPENSE') {
-      db.run(
-        'UPDATE cash_sessions SET expected_amount = expected_amount - ? WHERE id = ?',
-        [Number(amount), currentSession.id]
-      );
+    // The movement, its outbox trigger and the expected cash adjustment form one durable unit.
+    if (currentSession && scope === 'SESSION') {
+      if (type === 'INJECTION' || type === 'ADJUSTMENT') {
+        db.run(
+          'UPDATE cash_sessions SET expected_amount = expected_amount + ? WHERE id = ?',
+          [Number(amount), currentSession.id]
+        );
+      } else if (type === 'WITHDRAWAL' || type === 'EXPENSE') {
+        db.run(
+          'UPDATE cash_sessions SET expected_amount = expected_amount - ? WHERE id = ?',
+          [Number(amount), currentSession.id]
+        );
+      }
     }
-  }
-
-  db.save();
+    return inserted;
+  });
 
   return jsonResponse(res, 201, {
     id: result.lastId,
@@ -2486,15 +2765,16 @@ function sessionToDto(s, salesByMethod, totalSales) {
     closingTime: s.closing_time || null,
     initialAmount: s.initial_amount || 0,
     expectedAmount: s.expected_amount || 0,
-    countedAmount: s.counted_amount || null,
-    difference: s.difference || null,
+    expectedAmountInCash: computeExpectedInCash(getDb(), s),
+    countedAmount: s.counted_amount ?? null,
+    difference: s.difference ?? null,
     cashRegisterId: s.cash_register_id || null,
     cashRegisterName: s.cash_register_name || null,
     cashRegisterCode: s.cash_register_code || null,
     salesByPaymentMethod: salesByMethod || {},
     totalSales: totalSales || 0,
     closingNote: s.closing_note || null,
-    floatLeftForNext: s.float_left_for_next || null,
+    floatLeftForNext: s.float_left_for_next ?? null,
   };
 }
 
@@ -2665,6 +2945,19 @@ function startLocalServer() {
         const route = parseRoute(req.url);
         const subpath = route.subpath.split('?')[0];
 
+        // Fiscal receipts are fetched online for printing, including cashier sessions.
+        // Preserve PDF bytes; decoding them as text corrupts embedded fonts and images.
+        const fiscalPdf = /^\/arca\/invoices\/\d+\/pdf$/.test(subpath);
+        const fiscalBySale = /^\/arca\/invoices\/by-sale\/\d+$/.test(subpath);
+        if (req.method === 'GET' && (fiscalPdf || fiscalBySale)) {
+          const db = getDb();
+          if (Number(route.clientId) !== Number(getConfigVal(db, 'client_id'))
+              || Number(route.sucursalId) !== Number(getConfigVal(db, 'sucursal_id'))) {
+            return jsonResponse(res, 403, { error: 'El comprobante debe corresponder a la sucursal activa.' });
+          }
+          return await proxyToCloud(req, res, req.method, req.url, {}, { rawResponse: fiscalPdf });
+        }
+
         // Excepción binaria acotada: preservar el multipart y su boundary hacia la nube.
         const isProductImageRoute = /^\/items\/\d+\/image$/.test(subpath);
         if (isProductImageRoute && (req.method === 'PUT' || req.method === 'DELETE')) {
@@ -2712,7 +3005,19 @@ function startLocalServer() {
         // Cloud-only routes (dashboard, reports, finance, employees, etc.)
         // Admin/Owner → proxy to cloud
         // Cajero/Inventario → 403 blocked
-        if (route.clientId && isCloudOnlyRoute(subpath)) {
+        // Tutorial progress is online-only user metadata, including for cashiers.
+        // It must never enter the business outbox.
+        if (subpath === '/onboarding' && (req.method === 'GET' || req.method === 'PUT')) {
+          if (Number(route.clientId) !== Number(getConfigVal(getDb(), 'client_id'))) {
+            return jsonResponse(res, 403, { error: 'El tutorial debe corresponder al comercio activo.' });
+          }
+          return await proxyToCloud(req, res, req.method, req.url, body);
+        }
+
+        const localCashierBranchList = req.method === 'GET'
+          && subpath === '/sucursales'
+          && !getUserRoles().some((role) => ['ROLE_PROPIETARIO', 'ROLE_OWNER'].includes(String(role).toUpperCase()));
+        if (route.clientId && isCloudOnlyRoute(subpath) && !localCashierBranchList) {
           if (isAdminOrOwner()) {
             const fullUrl = req.url; // preserve original URL with query params
             return await proxyToCloud(req, res, req.method, fullUrl, body);
@@ -2722,8 +3027,16 @@ function startLocalServer() {
           });
         }
 
+        if (subpath === '/inventory/wholesale-prices' && req.method === 'GET') {
+          if (Number(route.clientId) !== Number(getConfigVal(getDb(), 'client_id'))) {
+            return jsonResponse(res, 403, { error: 'El inventario debe corresponder al comercio activo.' });
+          }
+          return await proxyToCloud(req, res, req.method, req.url, body);
+        }
+
         // ── Multi-branch inventory search (always cloud, any role) ──
-        if (subpath === '/inventory/all-branches' || subpath === '/products/all-branches') {
+        if (subpath === '/inventory/all-branches' || subpath === '/products/all-branches'
+            || subpath === '/inventory/page') {
           const fullUrl = req.url;
           return await proxyToCloud(req, res, req.method, fullUrl, body);
         }
@@ -2741,6 +3054,9 @@ function startLocalServer() {
 
         if (match) {
           await match.handler(req, res, body, route, query, match.params);
+          if (isMutation && !subpath.startsWith('/auth/')) {
+            loginEvents.emit('local-mutation', { method: req.method, path: subpath });
+          }
         } else if (isAdminOrOwner()) {
           // R4-#34: el fallback proxea rutas no manejadas a la nube con el token del dueño (confused
           // deputy). Acotamos con un denylist: el POS NUNCA debe alcanzar el super-admin/admin global de
