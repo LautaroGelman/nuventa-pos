@@ -272,3 +272,16 @@ para todos los roles del comercio, incluidos cajero e inventario. Se verifica
 el comercio activo antes del proxy y se conserva el JWT del usuario. El backend
 resuelve los permisos y el progreso individual. Requiere conexión y no crea
 mutaciones en el outbox. Regresión: `cashier_tutorial_progress_is_scoped_and_never_queued`.
+
+
+## Precios mayoristas (8/9/2026)
+
+`GET /api/client-panel/{clientId}/inventory/wholesale-prices` consulta la nube también
+para cajeros e inventario, verificando el comercio activo y conservando el JWT.
+No genera operaciones en el outbox. Sin conexión no hay referencias mayoristas vigentes.
+
+`POST /promotions/apply` verifica cliente y sucursal activos. Con conexión autenticada
+usa el cálculo del backend para combos, precios mayoristas y promociones por medio de pago.
+Sin conexión conserva el subtotal sin promociones; no existe aún un catálogo de promociones
+sincronizado para calcularlas offline. Regresión:
+`cashier_wholesale_prices_and_online_calculation_are_scoped`.

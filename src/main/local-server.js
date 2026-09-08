@@ -2289,7 +2289,16 @@ handlers['GET /cash-sessions/:id/expenses'] = async (req, res, body, route, quer
 
 // ─── PROMOTIONS ──────────────────────────────────────────
 
-handlers['POST /promotions/apply'] = async (req, res, body) => {
+handlers['POST /promotions/apply'] = async (req, res, body, route) => {
+  const db = getDb();
+  if (Number(route.clientId) !== Number(getConfigVal(db, 'client_id'))
+      || Number(route.sucursalId) !== Number(getConfigVal(db, 'sucursal_id'))) {
+    return jsonResponse(res, 403, { error: 'La promoción debe corresponder a la sucursal activa.' });
+  }
+  // Use the same authoritative calculator as the web while connected.
+  if (apiClient.token && await apiClient.isOnline() && apiClient.lastHeartbeatAuthed) {
+    return proxyToCloud(req, res, 'POST', req.url, body);
+  }
   // No promotions offline — return original totals
   const originalSubtotal = (body.items || []).reduce(
     (sum, i) => sum + (i.quantity || 0) * (i.unitPrice || 0), 0
@@ -3016,6 +3025,13 @@ function startLocalServer() {
           return jsonResponse(res, 403, {
             error: 'Esta función no está disponible para tu rol en modo local.',
           });
+        }
+
+        if (subpath === '/inventory/wholesale-prices' && req.method === 'GET') {
+          if (Number(route.clientId) !== Number(getConfigVal(getDb(), 'client_id'))) {
+            return jsonResponse(res, 403, { error: 'El inventario debe corresponder al comercio activo.' });
+          }
+          return await proxyToCloud(req, res, req.method, req.url, body);
         }
 
         // ── Multi-branch inventory search (always cloud, any role) ──

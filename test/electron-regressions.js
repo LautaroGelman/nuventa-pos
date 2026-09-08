@@ -298,18 +298,48 @@ app.whenReady().then(async()=>{
  try {
   apiClient.setBaseUrl(`http://127.0.0.1:${tutorialCloud.address().port}`);
   const url = `http://127.0.0.1:${port}/api/client-panel/1/onboarding`;
-  assert.equal((await fetch(url)).status, 200);
-  assert.equal((await fetch(url, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:'DISMISSED'})})).status, 200);
+  assert.equal((await fetch(`${url}?tutorialVersion=commerce-v2`)).status, 200);
+  const tutorialV2 = {tutorialVersion:'commerce-v2',status:'IN_PROGRESS',completedTaskIds:['inventory.create'],taskPositions:{'sales.open':'choose'},mutedSections:['inventory','purchaseOrders','finanzas','reports'],revision:0};
+  assert.equal((await fetch(url, {method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(tutorialV2)})).status, 200);
   assert.equal((await fetch(url.replace('/1/', '/2/'))).status, 403);
   assert.equal(tutorialRequests.length, 2);
   assert.equal(tutorialRequests[1].method, 'PUT');
-  assert.deepEqual(JSON.parse(tutorialRequests[1].body), {status:'DISMISSED'});
+  assert.equal(tutorialRequests[0].path, '/api/client-panel/1/onboarding?tutorialVersion=commerce-v2');
+  assert.deepEqual(JSON.parse(tutorialRequests[1].body), tutorialV2);
   assert.equal(tutorialRequests[1].authorization, 'Bearer audit-synthetic-token');
   assert.equal(db.get('SELECT COUNT(*) AS n FROM sync_outbox').n, 0);
   record('cashier_tutorial_progress_is_scoped_and_never_queued',{passed:true});
  } finally {
   await new Promise(resolve => tutorialCloud.close(resolve));
  }
+ reset();
+ const wholesaleRequests=[];
+ const wholesaleCloud=require('http').createServer((req,res)=>{
+  wholesaleRequests.push(req.url);
+  res.writeHead(200,{'Content-Type':'application/json'});
+  res.end(JSON.stringify(req.method==='GET'
+   ? [{sucursalId:1,productId:701,promotionId:1,minimumQuantity:6,unitPrice:80}]
+   : {originalSubtotal:700,totalDiscount:140,finalTotal:560,appliedPromotions:[]}));
+ });
+ await new Promise(resolve=>wholesaleCloud.listen(0,'127.0.0.1',resolve));
+ try {
+  apiClient.setBaseUrl(`http://127.0.0.1:${wholesaleCloud.address().port}`);
+  const quoteUrl=`http://127.0.0.1:${port}/api/client-panel/1/inventory/wholesale-prices`;
+  const quotes=await fetch(quoteUrl);
+  assert.equal(quotes.status,200);assert.equal((await quotes.json())[0].unitPrice,80);
+  assert.equal((await fetch(quoteUrl.replace('/1/','/2/'))).status,403);
+  apiClient.isOnline=async()=>true;apiClient.lastHeartbeatAuthed=true;
+  const preview=await request('/promotions/apply',{items:[{productId:701,quantity:7,unitPrice:100}]});
+  assert.equal(preview.status,200);assert.equal(preview.body.finalTotal,560);
+  const wrongBranch=await fetch(`http://127.0.0.1:${port}/api/client-panel/1/sucursales/2/promotions/apply`,{
+   method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:[]})});
+  assert.equal(wrongBranch.status,403);assert.equal(wholesaleRequests.length,2);
+  assert.equal(db.get('SELECT COUNT(*) AS n FROM sync_outbox').n,0);
+  apiClient.isOnline=async()=>false;
+  const offline=await request('/promotions/apply',{items:[{productId:701,quantity:7,unitPrice:100}]});
+  assert.equal(offline.body.finalTotal,700);assert.equal(wholesaleRequests.length,2);
+  record('cashier_wholesale_prices_and_online_calculation_are_scoped',{passed:true});
+ } finally {await new Promise(resolve=>wholesaleCloud.close(resolve));}
  console.log(`[REGRESSION] ${results.length} escenarios verificados`);
  }finally{if(process.env.NUVENTA_REGRESSION_RESULTS) fs.writeFileSync(process.env.NUVENTA_REGRESSION_RESULTS,JSON.stringify(results,null,2));await stopLocalServer();database.closeDatabase();app.quit();}
 }).catch(e=>{console.error(e.stack);app.exit(1);});

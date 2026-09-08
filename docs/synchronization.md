@@ -81,3 +81,15 @@ una operación remota. El cierre de la app no inicia una sincronización nueva.
 
 El reporte exportable contiene versión, canal, estado/progreso del actualizador, códigos de error,
 cursor opaco y cantidad/tamaño/antigüedad del outbox. Nunca incluye JWT, credenciales ni payloads.
+# Progreso del tutorial commerce-v2
+
+GET/PUT `/api/client-panel/{clientId}/onboarding` se reenvían al backend online para el
+comercio autenticado, incluidos cajeros e inventario. GET conserva `tutorialVersion` y
+PUT conserva posiciones por tarea, preferencias y revisión. Las llamadas v1 siguen
+funcionando sin el parámetro. La regresión de Electron verifica ambas versiones,
+rechazo de otro comercio y ausencia de entradas en la cola offline.
+
+El frontend conserva el avance de sesión si no hay conexión y reintenta su guardado;
+este mecanismo es independiente de sincronizar ventas. El export comprobado del frontend
+se copia a `resources/web` para revisión local. Validación: `npm run check`,
+`npm run test:regressions` y `npm run test:smoke`.
