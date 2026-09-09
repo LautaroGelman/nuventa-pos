@@ -66,3 +66,6 @@ permite descargar el PDF de esa sucursal también al cajero y conserva sus bytes
 tamaño del papel. La salida física requiere probar el controlador y hardware real.
 Referencias: [Electron print](https://www.electronjs.org/docs/latest/api/web-contents#contentsprintoptions-callback)
 y [Windows Settings](https://learn.microsoft.com/en-us/windows/apps/develop/launch/launch-settings).
+# Indicación de precio mayorista
+
+Los tickets destacan `PRECIO MAYORISTA APLICADO` y marcan cada línea que guarda `wholesaleApplied`. El indicador describe el precio unitario cobrado; no agrega un descuento ni modifica subtotal, promociones o total. Las ventas locales obtienen esta marca del mínimo mayorista guardado con la línea. Las ventas web nuevas la reciben del backend y las históricas sin marca conservan su presentación anterior.

@@ -574,7 +574,7 @@ function canManageInventory() {
 // Used for admin/owner routes that don't have local implementations
 // (dashboard, reports, finance, employees, daily-close, etc.)
 
-async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false, rawResponse = false } = {}) {
+async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false, rawResponse = false, onSuccessJson = null } = {}) {
   const db = getDb();
   const rawToken = getConfigVal(db, 'auth_token');
   const token = rawToken ? decryptToken(rawToken) : null;
@@ -637,6 +637,10 @@ async function proxyToCloud(req, res, method, fullUrl, body, { rawBody = false, 
         error: 'Tu sesión fue cerrada o revocada en la nube. Volvé a iniciar sesión.',
         sessionRevoked: true,
       });
+    }
+
+    if (cloudRes.ok && onSuccessJson && requestToken === apiClient.token && requestAuthEpoch === apiClient.authEpoch) {
+      onSuccessJson(responseText ? JSON.parse(responseText) : {});
     }
 
     const imagePathMatch = fullUrl.split('?')[0].match(/\/items\/(\d+)\/image$/);
@@ -1000,6 +1004,10 @@ function productToDto(p) {
     stockTracked: p.stock_tracked == null ? true : !!p.stock_tracked,
     cost: p.cost || 0,
     price: p.price,
+    wholesaleEnabled: !!p.wholesale_enabled,
+    wholesaleConfigured: !!p.wholesale_configured,
+    wholesalePrice: p.wholesale_price ?? null,
+    wholesaleMinimumQuantity: p.wholesale_minimum_quantity ?? null,
     lowStockThreshold: p.low_stock_threshold || null,
     reorderQtyDefault: p.reorder_qty_default || null,
     preferredProviderId: p.preferred_provider_id || null,
@@ -1185,7 +1193,7 @@ handlers['POST /sales'] = async (req, res, body) => {
     .map((item) => item.productId == null ? null : Number(item.productId))
     .filter((id) => Number.isSafeInteger(id) && id > 0))];
   const productRows = requestedProductIds.length
-    ? db.all(`SELECT id, name, code, price, stock_tracked, catalog_revision, price_proof
+    ? db.all(`SELECT id, name, code, price, weighable, stock_tracked, catalog_revision, price_proof, wholesale_enabled, wholesale_price, wholesale_minimum_quantity, wholesale_price_proof
                 FROM products WHERE client_id = ? AND sucursal_id = ? AND active = 1
                  AND id IN (${requestedProductIds.map(() => '?').join(',')})`,
     [catalogClientId, catalogSucursalId, ...requestedProductIds])
@@ -1198,12 +1206,22 @@ handlers['POST /sales'] = async (req, res, body) => {
     });
   }
 
+  const pricingQuantities = new Map();
+  for (const item of items) if (item.productId != null) pricingQuantities.set(Number(item.productId),
+    (pricingQuantities.get(Number(item.productId)) || 0) + Number(item.quantity));
+  const onlineQuotes = safeJsonParse(getConfigVal(db, `product_price_quotes:${catalogClientId}:${catalogSucursalId}`), {});
   const resolvedItems = items.map((item) => {
     // R4-#8: los ítems INDEPENDIENTES (productId null) no están en el catálogo; traen customName y
     // unitPrice propios. El nombre se persiste en product_name — si no, el backend lo exige no-blank
     // al sincronizar y la venta independiente offline quedaba atrapada en needs_review.
     const prod = item.productId != null ? productsById.get(Number(item.productId)) : null;
     const clientUnitPrice = item.unitPrice != null ? Number(item.unitPrice) : null;
+    const cachedQuote = onlineQuotes[item.productId];
+    const quote = prod && !prod.weighable && cachedQuote?.quantity === pricingQuantities.get(Number(item.productId))
+      && Number.isFinite(cachedQuote.unitPrice) && cachedQuote.unitPrice > 0 && cachedQuote.priceProof ? cachedQuote : null;
+    const catalogPrice = quote ? quote.unitPrice
+      : (prod ? require('./wholesale-pricing').wholesalePrice(prod, pricingQuantities.get(Number(item.productId))) : 0);
+    const isWholesale = prod && catalogPrice < Number(prod.price);
     return {
       ...item,
       productName: prod
@@ -1211,15 +1229,17 @@ handlers['POST /sales'] = async (req, res, body) => {
         : (item.customName && String(item.customName).trim() ? String(item.customName).trim() : 'Producto'),
       productCode: prod ? prod.code : null,
       stockTracked: prod ? Number(prod.stock_tracked) !== 0 : false,
-      catalogRevision: prod ? Number(prod.catalog_revision || 0) : null,
-      priceProof: prod ? prod.price_proof : null,
+      catalogRevision: quote ? quote.catalogRevision : (prod ? Number(prod.catalog_revision || 0) : null),
+      priceProof: quote ? quote.priceProof : (prod ? (isWholesale ? prod.wholesale_price_proof : prod.price_proof) : null),
+      wholesaleMinimumQuantity: quote ? quote.wholesaleMinimumQuantity : (isWholesale ? prod.wholesale_minimum_quantity : null),
       clientUnitPrice,
-      unitPrice: clientUnitPrice != null
-        ? clientUnitPrice
-        : (prod && prod.price != null ? Number(prod.price) : 0),
+      unitPrice: prod && !prod.weighable ? catalogPrice : (clientUnitPrice ?? catalogPrice),
     };
   });
 
+  if (resolvedItems.some(item => item.wholesaleMinimumQuantity != null && !item.priceProof)) {
+    return jsonResponse(res, 409, { error: 'Sincronizá el catálogo antes de cobrar con precio mayorista.' });
+  }
   const gross = round2(resolvedItems.reduce((sum, i) => sum + (i.quantity * i.unitPrice), 0));
   const discount = Number(totalDiscount);
   if (!Number.isFinite(gross) || gross <= 0 || !Number.isFinite(discount) || discount < 0 || discount > round2(gross * 0.99)
@@ -1290,19 +1310,19 @@ handlers['POST /sales'] = async (req, res, body) => {
   ]);
 
   localId = saleResult.lastId;
-  db.run('UPDATE sales SET local_request_hash=? WHERE local_id=?', [requestHash, localId]);
+  db.run('UPDATE sales SET local_request_hash=?,product_pricing_version=1 WHERE local_id=?', [requestHash, localId]);
 
   for (const item of resolvedItems) {
     db.run(`
       INSERT INTO sale_items (sale_local_id, product_id, product_name, product_code, quantity,
-        unit_price, client_unit_price, catalog_revision, price_proof)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        unit_price, client_unit_price, catalog_revision, price_proof, wholesale_minimum_quantity)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       localId, item.productId,
       item.productName,
       item.productCode,
       item.quantity, item.unitPrice, item.clientUnitPrice,
-      item.catalogRevision, item.priceProof,
+      item.catalogRevision, item.priceProof, item.wholesaleMinimumQuantity,
     ]);
 
     // Decrement local stock. Los PESABLES quedan afuera igual que los no_code: se venden por kilo
@@ -1403,6 +1423,7 @@ handlers['GET /sales'] = async (req, res, body, route, query) => {
         productName: i.product_name,
         quantity: i.quantity,
         unitPrice: i.unit_price,
+        wholesaleApplied: i.wholesale_minimum_quantity != null,
       })),
     };
   });
@@ -1433,6 +1454,7 @@ function localSaleToDto(db, sale) {
       productName: item.product_name,
       quantity: item.quantity,
       unitPrice: item.unit_price,
+      wholesaleApplied: item.wholesale_minimum_quantity != null,
     })),
   };
 }
@@ -2185,6 +2207,7 @@ handlers['GET /cash-sessions/:id/sales'] = async (req, res, body, route, query, 
       productName: item.product_name,
       quantity: item.quantity,
       unitPrice: item.unit_price,
+      wholesaleApplied: item.wholesale_minimum_quantity != null,
     }));
     const payments = db.all(
       'SELECT * FROM sale_payments WHERE sale_local_id = ? ORDER BY id',
@@ -2251,6 +2274,7 @@ handlers['GET /cash-sessions/:id/returns'] = async (req, res, body, route, query
         productName: i.product_name,
         quantity: i.quantity,
         unitPrice: i.unit_price,
+        wholesaleApplied: i.wholesale_minimum_quantity != null,
       })),
     };
   });
@@ -2297,16 +2321,30 @@ handlers['POST /promotions/apply'] = async (req, res, body, route) => {
   }
   // Use the same authoritative calculator as the web while connected.
   if (apiClient.token && await apiClient.isOnline() && apiClient.lastHeartbeatAuthed) {
-    return proxyToCloud(req, res, 'POST', req.url, body);
+    return proxyToCloud(req, res, 'POST', req.url, body, { onSuccessJson: response => {
+      db.run('INSERT OR REPLACE INTO app_config (key,value) VALUES (?,?)',
+        [`product_price_quotes:${route.clientId}:${route.sucursalId}`, JSON.stringify(response.priceQuotes || {})]);
+      db.save();
+    } });
   }
+  // An offline preview supersedes the last online quote and uses the signed local catalog.
+  db.run('DELETE FROM app_config WHERE key=?', [`product_price_quotes:${route.clientId}:${route.sucursalId}`]);
   // No promotions offline — return original totals
+  const quantities = new Map();
+  for (const item of body.items || []) quantities.set(Number(item.productId), (quantities.get(Number(item.productId)) || 0) + Number(item.quantity || 0));
+  const unitPrices = {};
+  for (const [id, quantity] of quantities) {
+    const product = db.get('SELECT * FROM products WHERE id=? AND client_id=? AND sucursal_id=? AND active=1', [id, route.clientId, route.sucursalId]);
+    if (product && !product.weighable) unitPrices[id] = require('./wholesale-pricing').wholesalePrice(product, quantity);
+  }
   const originalSubtotal = (body.items || []).reduce(
-    (sum, i) => sum + (i.quantity || 0) * (i.unitPrice || 0), 0
+    (sum, i) => sum + (i.quantity || 0) * (unitPrices[i.productId] ?? i.unitPrice ?? 0), 0
   );
   return jsonResponse(res, 200, {
     originalSubtotal,
     totalDiscount: 0,
     finalTotal: originalSubtotal,
+    unitPrices,
     appliedPromotions: [],
   });
 };
@@ -2550,6 +2588,7 @@ handlers['GET /returns'] = async (req, res, body, route, query) => {
         productName: i.product_name,
         quantity: i.quantity,
         unitPrice: i.unit_price,
+        wholesaleApplied: i.wholesale_minimum_quantity != null,
       })),
     };
   });
@@ -3007,7 +3046,28 @@ function startLocalServer() {
         // Cajero/Inventario → 403 blocked
         // Tutorial progress is online-only user metadata, including for cashiers.
         // It must never enter the business outbox.
-        if (subpath === '/onboarding' && (req.method === 'GET' || req.method === 'PUT')) {
+        if (subpath === '/product-form-preferences' && ['GET', 'PATCH'].includes(req.method)) {
+          const db = getDb();
+          if (Number(route.clientId) !== Number(getConfigVal(db, 'client_id')) || Number(route.sucursalId) !== Number(getConfigVal(db, 'sucursal_id')))
+            return jsonResponse(res, 403, { error: 'La preferencia debe corresponder a la sucursal activa.' });
+          if (req.method === 'PATCH' && !canManageInventory()) return jsonResponse(res, 403, { error: 'No tenés permisos para modificar las preferencias.' });
+          const preferences = require('./product-form-preferences');
+          if (req.method === 'PATCH') {
+            if (!body || Object.keys(body).some(key => !['wholesaleEnabled', 'photoEnabled'].includes(key) || typeof body[key] !== 'boolean'))
+              return jsonResponse(res, 400, { error: 'Preferencias inválidas.' });
+            preferences.patchPreferences(db, route.clientId, route.sucursalId, body);
+          }
+          try { if (apiClient.token && !require('./offline-session').isOfflineSession(apiClient.token))
+            await preferences.syncPreferences(db, apiClient, Number(route.clientId), Number(route.sucursalId));
+          } catch { /* Durable pending preferences are retried by sync. */ }
+          return jsonResponse(res, 200, preferences.getPreferences(db, route.clientId, route.sucursalId));
+        }
+        if (/^\/items\/\d+\/wholesale-legacy$/.test(subpath) && req.method === 'GET') {
+          if (Number(route.clientId) !== Number(getConfigVal(getDb(), 'client_id')) || Number(route.sucursalId) !== Number(getConfigVal(getDb(), 'sucursal_id')))
+            return jsonResponse(res, 403, { error: 'Producto de otra sucursal.' });
+          return await proxyToCloud(req, res, req.method, req.url, body);
+        }
+        if (subpath === '/onboarding'  && (req.method === 'GET' || req.method === 'PUT')) {
           if (Number(route.clientId) !== Number(getConfigVal(getDb(), 'client_id'))) {
             return jsonResponse(res, 403, { error: 'El tutorial debe corresponder al comercio activo.' });
           }
@@ -3030,6 +3090,12 @@ function startLocalServer() {
         if (subpath === '/inventory/wholesale-prices' && req.method === 'GET') {
           if (Number(route.clientId) !== Number(getConfigVal(getDb(), 'client_id'))) {
             return jsonResponse(res, 403, { error: 'El inventario debe corresponder al comercio activo.' });
+          }
+          if (!apiClient.token || !await apiClient.isOnline()) {
+            const offers = getDb().all(`SELECT * FROM products WHERE client_id=? AND active=1
+              AND wholesale_enabled=1 AND weighable=0 AND wholesale_price>0 AND wholesale_price<price AND wholesale_minimum_quantity>=2`, [Number(route.clientId)])
+              .map(p => ({sucursalId:p.sucursal_id, productId:p.id, promotionId:null, unitPrice:p.wholesale_price, minimumQuantity:p.wholesale_minimum_quantity,productName:p.name,productCode:p.code}));
+            return jsonResponse(res, 200, offers);
           }
           return await proxyToCloud(req, res, req.method, req.url, body);
         }

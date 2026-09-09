@@ -122,6 +122,7 @@ function normalizeTicketPayload(payload) {
     items: items.map((item, index) => ({
       quantity: finiteMoney(item?.quantity, `cantidad del ítem ${index + 1}`),
       description: cleanString(item?.description, 300, true),
+      wholesaleApplied: item?.wholesaleApplied === true,
       unitPrice: finiteMoney(item?.unitPrice, `precio del ítem ${index + 1}`),
       total: finiteMoney(item?.total, `total del ítem ${index + 1}`),
     })),
@@ -143,7 +144,7 @@ function buildTicketHtml(payload, paperFormat) {
   const padding = paperFormat === 'A4' ? '8mm' : '4mm 3mm';
   const itemRows = ticket.items.map((item) => `
     <div class="item"><div>${escapeHtml(formatAmount(item.quantity))} × ${escapeHtml(item.description)}</div><div class="amount">$ ${escapeHtml(formatAmount(item.total))}</div></div>
-    <div class="unit">$ ${escapeHtml(formatAmount(item.unitPrice))} c/u</div>`).join('');
+    <div class="unit">${item.wholesaleApplied ? '<strong>MAYORISTA · </strong>' : ''}$ ${escapeHtml(formatAmount(item.unitPrice))} c/u</div>`).join('');
   const payments = ticket.paymentMethods.length
     ? `<div class="row"><span>Pago</span><span>${escapeHtml(ticket.paymentMethods.join(' + '))}</span></div>`
     : '';
@@ -164,6 +165,7 @@ function buildTicketHtml(payload, paperFormat) {
   .item > :first-child, .row > :first-child { min-width: 0; overflow-wrap: anywhere; }
   .amount, .row > :last-child { white-space: nowrap; text-align: right; }
   .unit { margin: 0 0 1.5mm; font-size: 9px; }
+  .wholesale { border: 2px solid #000; padding: 2mm; margin-bottom: 2mm; font-size: 12px; font-weight: 800; text-align: center; }
   .total { font-size: 15px; font-weight: 700; }
 </style></head><body>
   <h1>${escapeHtml(ticket.business.name)}</h1>
@@ -174,6 +176,7 @@ function buildTicketHtml(payload, paperFormat) {
   <div class="row"><span>Venta</span><span>${escapeHtml(ticket.saleId)}</span></div>
   <div class="row"><span>Fecha</span><span>${escapeHtml(ticket.date)}</span></div>
   <div class="rule"></div>
+  ${ticket.items.some(item => item.wholesaleApplied) ? '<div class="wholesale">PRECIO MAYORISTA APLICADO</div>' : ''}
   ${itemRows}
   <div class="rule"></div>
   <div class="row"><span>Subtotal</span><span>$ ${escapeHtml(formatAmount(ticket.subtotal))}</span></div>

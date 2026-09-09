@@ -93,3 +93,33 @@ El frontend conserva el avance de sesión si no hay conexión y reintenta su gua
 este mecanismo es independiente de sincronizar ventas. El export comprobado del frontend
 se copia a `resources/web` para revisión local. Validación: `npm run check`,
 `npm run test:regressions` y `npm run test:smoke`.
+
+## Mayorista del producto y preferencias de carga
+
+El catálogo conserva `wholesale_enabled`, `wholesale_configured`, `wholesale_price`,
+`wholesale_minimum_quantity` y `wholesale_price_proof`. La regla se aplica en cotización y venta
+offline a todas las unidades cuando la cantidad agregada alcanza el mínimo. La venta guarda su
+precio, mínimo y firma antes de congelar el outbox; no dependen del catálogo al sincronizar.
+`sales.product_pricing_version=1` distingue el contrato nuevo de operaciones de builds anteriores.
+Sin firma mayorista el POS solicita sincronizar antes de cobrar; si no hay protocolo v2 disponible,
+una venta mayorista pendiente se conserva y no se envía por la ruta v1 que recalcula importes.
+El inventario puede leer las reglas nativas de su catálogo local sin conexión.
+
+Las preferencias de los switches usan claves `product_form_preferences:{clientId}:{sucursalId}`
+y una cola independiente `product_form_preferences_pending:{clientId}:{sucursalId}`. Se persisten
+antes de responder, se fusionan por campo y se reintentan al sincronizar. Una respuesta en vuelo
+no borra cambios más recientes ni se aplica luego de cambiar la identidad. No ingresan al outbox
+de ventas, y el endpoint mantiene los permisos de inventario y el aislamiento de sucursal.
+Las reglas históricas con fechas/escalones mantienen su funcionamiento online hasta convertirse.
+
+SQLite aplica la migración aditiva 14 (`product_wholesale_pricing`) también en instalaciones que
+ya tienen v2. No se modifica la migración 9 existente. Las cotizaciones online nuevas incluyen
+`priceQuotes` firmadas: el guardado local usa el precio cotizado para esa cantidad y conserva
+su prueba en el outbox. Una cotización offline posterior vuelve al catálogo local.
+
+## Entrega mayorista del 9/9/2026
+
+Publicar primero el backend con V15/V16 y verificar salud, luego frontend y el instalador
+del canal direct con sus commits exactos. El ticket conserva la marca mayorista registrada
+al cobrar. La dependencia js-yaml se fija en 4.3.2 para incorporar la correcci?n de seguridad
+GHSA-2883-xcg3-v3hh sin cambiar el contrato del actualizador.

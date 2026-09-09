@@ -220,3 +220,11 @@ test('A4 PDFs respect the driver printable margins and thermal PDFs keep roll ma
   await h.service.printPdf(h.sender,PDF,{deviceName:'Thermal',paperFormat:'TICKET_58'});
   assert.deepEqual(h.printCalls.map(call=>call.margins.marginType),['default','none']);
 });
+
+test('ticket destaca mayorista sin convertirlo en descuento ni alterar totales', () => {
+ const html=buildTicketHtml({requestId:'wholesale-test',saleId:'188',business:{name:'Demo'},date:'09/09/2026',
+  items:[{quantity:3,description:'Monitor',unitPrice:300000,total:900000,wholesaleApplied:true}],
+  subtotal:900000,discount:45000,total:855000,paymentMethods:['EFECTIVO']},'TICKET_58');
+ assert.match(html,/PRECIO MAYORISTA APLICADO/); assert.match(html,/MAYORISTA ·/);
+ assert.match(html,/855.000,00/); assert.match(html,/45.000,00/);
+});

@@ -324,6 +324,7 @@ app.whenReady().then(async()=>{
  await new Promise(resolve=>wholesaleCloud.listen(0,'127.0.0.1',resolve));
  try {
   apiClient.setBaseUrl(`http://127.0.0.1:${wholesaleCloud.address().port}`);
+  apiClient.isOnline=async()=>true;
   const quoteUrl=`http://127.0.0.1:${port}/api/client-panel/1/inventory/wholesale-prices`;
   const quotes=await fetch(quoteUrl);
   assert.equal(quotes.status,200);assert.equal((await quotes.json())[0].unitPrice,80);
@@ -340,6 +341,82 @@ app.whenReady().then(async()=>{
   assert.equal(offline.body.finalTotal,700);assert.equal(wholesaleRequests.length,2);
   record('cashier_wholesale_prices_and_online_calculation_are_scoped',{passed:true});
  } finally {await new Promise(resolve=>wholesaleCloud.close(resolve));}
+
+
+ reset();
+ const signedQuoteCloud=require('http').createServer((req,res)=>{
+  res.writeHead(200,{'Content-Type':'application/json'});
+  res.end(JSON.stringify({originalSubtotal:480,totalDiscount:0,finalTotal:480,unitPrices:{701:80},
+   priceQuotes:{701:{unitPrice:80,catalogRevision:8,priceProof:'w1.online',wholesaleMinimumQuantity:6,quantity:6}},appliedPromotions:[]}));
+ });
+ await new Promise(resolve=>signedQuoteCloud.listen(0,'127.0.0.1',resolve));
+ try {
+  apiClient.setBaseUrl(`http://127.0.0.1:${signedQuoteCloud.address().port}`);
+  apiClient.isOnline=async()=>true;apiClient.lastHeartbeatAuthed=true;
+  const preview=await request('/promotions/apply',{productPricingVersion:1,items:[{productId:701,quantity:3,unitPrice:100},{productId:701,quantity:3,unitPrice:100}]});
+  assert.equal(preview.body.finalTotal,480);
+  const quotedSale=await request('/sales',sale({clientSaleUuid:crypto.randomUUID(),items:[{productId:701,quantity:6}],originalTotal:480,finalTotal:480,payments:[{paymentMethod:'EFECTIVO',amount:480}]}));
+  assert.equal(quotedSale.status,201,JSON.stringify(quotedSale.body));assert.equal(quotedSale.body.items[0].unitPrice,80);
+  const frozen=JSON.parse(db.get("SELECT payload_json FROM sync_outbox WHERE mutation_type='SALE' ORDER BY sequence DESC LIMIT 1").payload_json);
+  assert.equal(frozen.items[0].priceProof,'w1.online');assert.equal(frozen.items[0].catalogRevision,8);
+  const under=await request('/sales',sale({clientSaleUuid:crypto.randomUUID(),items:[{productId:701,quantity:5}],originalTotal:400,finalTotal:400,payments:[{paymentMethod:'EFECTIVO',amount:400}]}));
+  assert.equal(under.status,400);
+  apiClient.isOnline=async()=>false;
+  const offline=await request('/promotions/apply',{items:[{productId:701,quantity:6,unitPrice:100}]});
+  assert.equal(offline.body.finalTotal,600);
+  record('signed_online_quote_matches_local_sale_despite_legacy_or_stale_catalog',{passed:true});
+ } finally {await new Promise(resolve=>signedQuoteCloud.close(resolve));}
+ reset();
+ db.run("UPDATE products SET wholesale_enabled=1,wholesale_configured=1,wholesale_price=80,wholesale_minimum_quantity=6,wholesale_price_proof='w1.test',catalog_revision=3 WHERE id=701");
+ const localOffers=await fetch(`http://127.0.0.1:${port}/api/client-panel/1/inventory/wholesale-prices`).then(r=>r.json());
+ assert.equal(localOffers[0].unitPrice,80);
+ const quote=await request('/promotions/apply',{items:[{productId:701,quantity:3,unitPrice:100},{productId:701,quantity:3,unitPrice:100}]});
+ assert.equal(quote.body.originalSubtotal,480); assert.deepEqual(quote.body.appliedPromotions,[]);
+ assert.equal(quote.body.unitPrices['701'],80);
+ const nativeSale=await request('/sales',sale({clientSaleUuid:crypto.randomUUID(),items:[{productId:701,quantity:6}],originalTotal:480,finalTotal:480,payments:[{paymentMethod:'EFECTIVO',amount:480}]}));
+ assert.equal(nativeSale.status,201,JSON.stringify(nativeSale.body));assert.equal(nativeSale.body.items[0].unitPrice,80);assert.equal(nativeSale.body.items[0].wholesaleApplied,true);
+ const frozen=db.get("SELECT payload_json FROM sync_outbox WHERE mutation_type='SALE' ORDER BY sequence DESC LIMIT 1");
+ assert.ok(frozen);const sold=JSON.parse(frozen.payload_json).items[0];
+ assert.equal(sold.unitPrice,80);assert.equal(sold.wholesaleMinimumQuantity,6);assert.equal(sold.priceProof,'w1.test');
+ db.run('UPDATE products SET wholesale_price=70,wholesale_minimum_quantity=10 WHERE id=701');db.save();
+ database.closeDatabase();await database.initDatabase();db=database.getDb();
+ assert.equal(db.get('SELECT unit_price FROM sale_items ORDER BY id DESC LIMIT 1').unit_price,80);
+ assert.equal(JSON.parse(db.get("SELECT payload_json FROM sync_outbox WHERE mutation_type='SALE' ORDER BY sequence DESC LIMIT 1").payload_json).items[0].wholesaleMinimumQuantity,6);
+
+ const nativeReturn=await request('/returns',{saleId:nativeSale.body.id,items:[{productId:701,quantity:3}],refundMethod:'CASH'});
+ assert.equal(nativeReturn.status,201,JSON.stringify(nativeReturn.body));assert.equal(nativeReturn.body.totalRefund,240);
+ record('native_wholesale_quote_sale_receipt_and_frozen_offline_proof_survive_restart',{passed:true});
+ reset();
+ const previousVersionSale=await request('/sales',sale());assert.equal(previousVersionSale.status,201);
+ // Recreate a populated v13 database, then let the real startup migrator upgrade it.
+ for(const [table,columns] of Object.entries({products:['wholesale_enabled','wholesale_configured','wholesale_price','wholesale_minimum_quantity','wholesale_price_proof'],sale_items:['wholesale_minimum_quantity'],sales:['product_pricing_version']})) {
+  for(const column of columns) db.run(`ALTER TABLE ${table} DROP COLUMN ${column}`);
+ }
+ db.run('DELETE FROM schema_migrations WHERE version=14');db.save();
+ database.closeDatabase();await database.initDatabase();db=database.getDb();
+ assert.equal(db.get('SELECT wholesale_enabled FROM products WHERE id=701').wholesale_enabled,0);
+ assert.equal(db.get('SELECT product_pricing_version FROM sales ORDER BY local_id DESC LIMIT 1').product_pricing_version,null);
+ assert.equal(db.get('SELECT unit_price FROM sale_items ORDER BY id DESC LIMIT 1').unit_price,100);
+ assert.equal(db.get('SELECT COUNT(*) n FROM schema_migrations WHERE version=14').n,1);
+ record('existing_pos_v13_migrates_additively_without_repricing_sales',{passed:true});
+
+ reset();
+ db.run("UPDATE products SET catalog_revision=3,price_proof='v1.cached',wholesale_enabled=1,wholesale_configured=1,wholesale_price=80,wholesale_minimum_quantity=6,wholesale_price_proof='w1.cached' WHERE id=701");
+ db.run("INSERT INTO sync_state(client_id,sucursal_id,device_id,cursor) VALUES(1,1,'test-device','existing-cursor')");
+ const oldGetProducts=apiClient.getProducts;
+ let downloaded={id:701,name:'Audit product',price:100,quantity:100,wholesaleEnabled:true,wholesaleConfigured:true,wholesalePrice:80,wholesaleMinimumQuantity:6};
+ apiClient.getProducts=async()=>[downloaded];
+ const catalogRefresh=new SyncService();
+ try {
+  await catalogRefresh._downloadProducts();
+  assert.equal(db.get('SELECT wholesale_price_proof FROM products WHERE id=701').wholesale_price_proof,'w1.cached');
+  assert.equal(db.get('SELECT catalog_revision FROM products WHERE id=701').catalog_revision,3);
+  assert.equal(db.get('SELECT cursor FROM sync_state WHERE client_id=1 AND sucursal_id=1').cursor,'existing-cursor');
+  downloaded={...downloaded,wholesaleMinimumQuantity:10};await catalogRefresh._downloadProducts();
+  assert.equal(db.get('SELECT wholesale_price_proof FROM products WHERE id=701').wholesale_price_proof,null);
+  assert.equal(db.get('SELECT cursor FROM sync_state WHERE client_id=1 AND sucursal_id=1').cursor,null);
+  record('unsigned_catalog_refresh_preserves_matching_proofs_and_requests_changed_rules',{passed:true});
+ } finally {apiClient.getProducts=oldGetProducts;catalogRefresh.stop();}
  console.log(`[REGRESSION] ${results.length} escenarios verificados`);
  }finally{if(process.env.NUVENTA_REGRESSION_RESULTS) fs.writeFileSync(process.env.NUVENTA_REGRESSION_RESULTS,JSON.stringify(results,null,2));await stopLocalServer();database.closeDatabase();app.quit();}
 }).catch(e=>{console.error(e.stack);app.exit(1);});
