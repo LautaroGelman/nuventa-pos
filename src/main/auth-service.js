@@ -619,7 +619,8 @@ class AuthService {
           db.run('UPDATE products SET active = 0 WHERE client_id = ? AND sucursal_id = ?',
             [clientId, sucursalId]);
 
-          for (const p of products) {
+          for (const downloaded of products) {
+            const p = require('./wholesale-pricing').retainCatalogProofs(db, downloaded, clientId, sucursalId);
             // R7-#52: si el producto tiene movimientos locales pendientes, NO pisar su quantity
             // (fragmento fijo, no entrada de usuario → seguro interpolar).
             const qtyClause = pendingProductIds.has(p.id) ? '' : 'quantity=excluded.quantity,';
@@ -663,6 +664,9 @@ class AuthService {
               clientId, sucursalId,
               now,
             ]);
+            db.run(`UPDATE products SET wholesale_enabled=?,wholesale_configured=?,wholesale_price=?,wholesale_minimum_quantity=?,wholesale_price_proof=?
+              WHERE id=? AND client_id=? AND sucursal_id=?`, [p.wholesaleEnabled ? 1 : 0, p.wholesaleConfigured ? 1 : 0,
+              p.wholesalePrice ?? null, p.wholesaleMinimumQuantity ?? null, p.wholesalePriceProof || null, p.id, clientId, sucursalId]);
           }
 
           db.run(

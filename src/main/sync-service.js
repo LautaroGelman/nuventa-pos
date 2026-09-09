@@ -179,6 +179,9 @@ class SyncService extends EventEmitter {
       const stillSameAuth = () => apiClient.authEpoch === epoch;
 
       const db = getDb();
+      try { await require('./product-form-preferences').syncPreferences(db, apiClient, syncIdentity.clientId, syncIdentity.sucursalId); }
+      catch (error) { console.warn('[SYNC] Product form preferences pending:', error.message); }
+      if (!stillSameAuth()) return;
       // R4-#33: solo refrescar la ventana de gracia offline si el heartbeat fue AUTENTICADO (2xx). Un
       // 401 (token revocado / suscripción morosa / empleado dado de baja) NO debe extender los 7 días.
       if (apiClient.lastHeartbeatAuthed) {
@@ -404,6 +407,11 @@ class SyncService extends EventEmitter {
         const items = db.all(
           'SELECT * FROM sale_items WHERE sale_local_id = ?', [sale.local_id]
         );
+        if (items.some(item => item.wholesale_minimum_quantity != null)) {
+          db.run("UPDATE sales SET sync_error=? WHERE local_id=?", ['Esta venta mayorista requiere sincronización POS v2.', sale.local_id]);
+          db.save();
+          continue;
+        }
         const payments = db.all(
           'SELECT * FROM sale_payments WHERE sale_local_id = ?', [sale.local_id]
         );
@@ -423,6 +431,7 @@ class SyncService extends EventEmitter {
 
         const payload = {
           clientSaleUuid: sale.client_sale_uuid || undefined,
+          productPricingVersion: sale.product_pricing_version ?? undefined,
           clientSessionUuid: (sessRow && sessRow.client_session_uuid) || undefined,
           saleDate: sale.sale_date,
           employeeId: sale.employee_id,
@@ -911,7 +920,8 @@ class SyncService extends EventEmitter {
       db.run('UPDATE products SET active = 0 WHERE client_id = ? AND sucursal_id = ?',
         [Number(apiClient.clientId), Number(apiClient.sucursalId)]);
 
-      for (const p of cloudProducts) {
+      for (const downloaded of cloudProducts) {
+        const p = require('./wholesale-pricing').retainCatalogProofs(db, downloaded, Number(apiClient.clientId), Number(apiClient.sucursalId));
         // Si el producto tiene movimientos locales pendientes, NO pisar su quantity (fragmento fijo,
         // no entrada de usuario → seguro interpolar).
         const qtyClause = pendingProductIds.has(p.id) ? '' : 'quantity=excluded.quantity,';
@@ -954,6 +964,9 @@ class SyncService extends EventEmitter {
           Number(apiClient.clientId), Number(apiClient.sucursalId),
           now,
         ]);
+        db.run(`UPDATE products SET wholesale_enabled=?,wholesale_configured=?,wholesale_price=?,wholesale_minimum_quantity=?,wholesale_price_proof=?
+          WHERE id=? AND client_id=? AND sucursal_id=?`, [p.wholesaleEnabled ? 1 : 0, p.wholesaleConfigured ? 1 : 0,
+          p.wholesalePrice ?? null, p.wholesaleMinimumQuantity ?? null, p.wholesalePriceProof || null, p.id, Number(apiClient.clientId), Number(apiClient.sucursalId)]);
       }
 
       db.run(

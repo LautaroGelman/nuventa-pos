@@ -59,6 +59,7 @@ function salePayload(db, outbox, clientId, sucursalId) {
   try { invoice = sale.invoice_json ? JSON.parse(sale.invoice_json) : undefined; } catch { invoice = undefined; }
   return {
     clientSaleUuid: sale.client_sale_uuid,
+    productPricingVersion: sale.product_pricing_version ?? undefined,
     clientSessionUuid: session?.client_session_uuid || undefined,
     saleDate: localDateTime(sale.sale_date),
     employeeId: sale.employee_id || undefined,
@@ -70,6 +71,7 @@ function salePayload(db, outbox, clientId, sucursalId) {
       unitPrice: Number(item.unit_price),
       catalogRevision: item.catalog_revision == null ? undefined : Number(item.catalog_revision),
       priceProof: item.price_proof || undefined,
+      wholesaleMinimumQuantity: item.wholesale_minimum_quantity ?? undefined,
       customName: item.product_id == null ? item.product_name : undefined,
     })),
     payments: payments.map((payment) => ({
@@ -298,6 +300,9 @@ function applyProduct(db, change, now, clientId, sucursalId) {
     JSON.stringify(product.providerIds || []), product.imageUrl || null,
     product.thumbnailUrl || null, clientId, sucursalId, now,
   ]);
+  db.run(`UPDATE products SET wholesale_enabled=?,wholesale_configured=?,wholesale_price=?,wholesale_minimum_quantity=?,wholesale_price_proof=?
+    WHERE id=? AND client_id=? AND sucursal_id=?`, [product.wholesaleEnabled ? 1 : 0, product.wholesaleConfigured ? 1 : 0,
+    product.wholesalePrice ?? null, product.wholesaleMinimumQuantity ?? null, product.wholesalePriceProof || null, product.id, clientId, sucursalId]);
 }
 
 function applyRegister(db, change, now, clientId, sucursalId) {

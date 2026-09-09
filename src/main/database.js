@@ -837,6 +837,19 @@ function runMigrations() {
       PRIMARY KEY(client_id,sucursal_id,id))`);
     db.run('ALTER TABLE sales ADD COLUMN local_request_hash TEXT');
   });
+
+  // Additive migration for existing v2 installations; never change an already applied migration.
+  applyMigration(14, 'product_wholesale_pricing', () => {
+    for (const statement of [
+      'ALTER TABLE products ADD COLUMN wholesale_enabled INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE products ADD COLUMN wholesale_configured INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE products ADD COLUMN wholesale_price REAL',
+      'ALTER TABLE products ADD COLUMN wholesale_minimum_quantity INTEGER',
+      'ALTER TABLE products ADD COLUMN wholesale_price_proof TEXT',
+      'ALTER TABLE sale_items ADD COLUMN wholesale_minimum_quantity INTEGER',
+      'ALTER TABLE sales ADD COLUMN product_pricing_version INTEGER',
+    ]) db.run(statement);
+  });
 }
 
 function applyMigration(version, name, migrate) {
