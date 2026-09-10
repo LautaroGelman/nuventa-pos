@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "roundingIncrement": 100,
+  "markupCases": [
+    {
+      "cost": 1800,
+      "percent": 30,
+      "expected": 2400
+    },
+    {
+      "cost": 2000,
+      "percent": 15,
+      "expected": 2300
+    },
+    {
+      "cost": 2000.01,
+      "percent": 15,
+      "expected": 2400
+    },
+    {
+      "cost": 0.05,
+      "percent": 10,
+      "expected": 100
+    },
+    {
+      "cost": 0,
+      "percent": 30,
+      "expected": 0
+    },
+    {
+      "cost": 2300,
+      "percent": 30,
+      "expected": 3000
+    }
+  ],
+  "unitCostCases": [
+    {
+      "amount": 30000,
+      "quantity": 15,
+      "pack": 1,
+      "expected": 2000
+    },
+    {
+      "amount": 24000,
+      "quantity": 2,
+      "pack": 6,
+      "expected": 2000
+    },
+    {
+      "amount": 201,
+      "quantity": 200,
+      "pack": 1,
+      "expected": 1.01
+    },
+    {
+      "amount": 0,
+      "quantity": 15,
+      "pack": 1,
+      "expected": 0
+    }
+  ]
+}

@@ -244,6 +244,10 @@ class SyncService extends EventEmitter {
         }
       }
 
+      if (db.get(`SELECT 1 FROM sync_outbox WHERE client_id=? AND sucursal_id=?
+          AND mutation_type IN ('PURCHASE_RECEIPT','PURCHASE_RECEIPT_AMOUNTS') LIMIT 1`, [syncIdentity.clientId, syncIdentity.sucursalId])) {
+        throw new Error('Hay ingresos pendientes que requieren el backend compatible con Compras. Las operaciones siguen guardadas en este equipo.');
+      }
       // 1. Upload pending sales (local → cloud)
       if (cashStateOnly) {
         const total = await this._uploadPendingCashSessions({ onlyOpen: true });
@@ -521,7 +525,7 @@ class SyncService extends EventEmitter {
           for (const si of saleItems) {
             // weighable = 0: a un pesable no se le descontó stock al crear la venta, así que
             // reintegrarlo acá lo inflaría (mismo criterio que el descuento en local-server).
-            db.run('UPDATE products SET quantity = quantity + ? WHERE id = ? AND no_code = 0 AND weighable = 0', [si.quantity, si.product_id]);
+            db.run('UPDATE products SET quantity = quantity + ? WHERE id = ? AND stock_tracked = 1 AND weighable = 0', [si.quantity, si.product_id]);
           }
           if (saleItems.length > 0) {
             console.log(`[SYNC] R8-#38: stock reintegrado por ${saleItems.length} ítem(s) de venta ${sale.local_id} → needs_review`);

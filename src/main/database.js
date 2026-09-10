@@ -850,6 +850,46 @@ function runMigrations() {
       'ALTER TABLE sales ADD COLUMN product_pricing_version INTEGER',
     ]) db.run(statement);
   });
+
+  applyMigration(15, 'purchase_receipts_and_provisional_products', () => {
+    for (const statement of [
+      'ALTER TABLE products ADD COLUMN client_product_uuid TEXT',
+      'ALTER TABLE products ADD COLUMN cost_pending INTEGER NOT NULL DEFAULT 0',
+      "ALTER TABLE products ADD COLUMN pricing_mode TEXT NOT NULL DEFAULT 'MANUAL'",
+      'ALTER TABLE products ADD COLUMN target_markup_percent REAL',
+      'ALTER TABLE sale_items ADD COLUMN client_product_uuid TEXT',
+      'ALTER TABLE sale_items ADD COLUMN unit_cost_at_sale REAL',
+      'ALTER TABLE sale_items ADD COLUMN cost_pending INTEGER NOT NULL DEFAULT 0',
+      'ALTER TABLE return_items ADD COLUMN client_product_uuid TEXT',
+    ]) db.run(statement);
+    db.run('CREATE UNIQUE INDEX idx_product_client_uuid ON products(client_id,sucursal_id,client_product_uuid)');
+    db.run(`CREATE TABLE purchase_receipts (
+      local_id INTEGER PRIMARY KEY AUTOINCREMENT, uuid TEXT NOT NULL, client_id INTEGER NOT NULL,
+      sucursal_id INTEGER NOT NULL, employee_id INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'DRAFT',
+      draft_json TEXT, request_json TEXT, request_hash TEXT, receipt_json TEXT NOT NULL,
+      sync_status TEXT NOT NULL DEFAULT 'pending', sync_error TEXT, remote_version INTEGER,
+      created_at TEXT NOT NULL, synced_at TEXT,
+      UNIQUE(client_id,sucursal_id,uuid))`);
+    db.run(`CREATE TABLE purchase_receipt_lines (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, receipt_local_id INTEGER NOT NULL REFERENCES purchase_receipts(local_id),
+      uuid TEXT NOT NULL, product_id INTEGER, client_product_uuid TEXT, quantity INTEGER NOT NULL,
+      UNIQUE(receipt_local_id,uuid))`);
+    db.run('CREATE INDEX idx_receipt_line_product ON purchase_receipt_lines(product_id,receipt_local_id)');
+    db.run(`CREATE TABLE purchase_receipt_amendments (
+      local_id INTEGER PRIMARY KEY AUTOINCREMENT, receipt_local_id INTEGER NOT NULL REFERENCES purchase_receipts(local_id),
+      uuid TEXT NOT NULL, client_id INTEGER NOT NULL, sucursal_id INTEGER NOT NULL, employee_id INTEGER NOT NULL,
+      payload_json TEXT NOT NULL, payload_hash TEXT NOT NULL,
+      sync_status TEXT NOT NULL DEFAULT 'pending', sync_error TEXT, created_at TEXT NOT NULL,
+      UNIQUE(client_id,sucursal_id,uuid))`);
+    db.run(`CREATE TABLE product_client_references (
+      client_id INTEGER NOT NULL, sucursal_id INTEGER NOT NULL, client_product_uuid TEXT NOT NULL,
+      local_product_id INTEGER NOT NULL, remote_product_id INTEGER,
+      PRIMARY KEY(client_id,sucursal_id,client_product_uuid))`);
+  });
+  applyMigration(16, 'purchase_receipt_price_references', () => {
+    db.run('ALTER TABLE products ADD COLUMN pending_price_receipt_uuid TEXT');
+    db.run('ALTER TABLE sale_items ADD COLUMN receipt_price_uuid TEXT');
+  });
 }
 
 function applyMigration(version, name, migrate) {

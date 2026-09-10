@@ -66,7 +66,10 @@ function salePayload(db, outbox, clientId, sucursalId) {
     status: sale.status || 'COMPLETED',
     cashRegisterId: sale.cash_register_id || session?.cash_register_id || undefined,
     items: items.map((item) => ({
-      productId: item.product_id == null ? undefined : Number(item.product_id),
+      productId: item.product_id == null || Number(item.product_id) < 0 ? undefined : Number(item.product_id),
+      clientProductUuid: item.client_product_uuid || undefined,
+      costPendingAtSale: item.cost_pending ? true : undefined,
+      receiptPriceUuid: item.receipt_price_uuid || undefined,
       quantity: Number(item.quantity),
       unitPrice: Number(item.unit_price),
       catalogRevision: item.catalog_revision == null ? undefined : Number(item.catalog_revision),
@@ -109,7 +112,8 @@ function returnPayload(db, outbox, clientId, sucursalId) {
     items: items.map((item) => ({
       // Local line IDs are not remote IDs. Resolve by product after the sale ACK.
       saleItemId: ret.sale_local_id ? undefined : item.sale_item_id || undefined,
-      productId: item.product_id || undefined,
+      productId: item.product_id == null || Number(item.product_id) < 0 ? undefined : item.product_id,
+      clientProductUuid: item.client_product_uuid || undefined,
       quantity: Number(item.quantity),
     })),
   };
@@ -177,7 +181,7 @@ function materialize(db, outbox, clientId, sucursalId) {
 }
 
 function freezeNewMutations(db, previousSequence) {
-  for (const row of db.all('SELECT * FROM sync_outbox WHERE sequence>? AND payload_json IS NULL', [previousSequence])) {
+  for (const row of db.all('SELECT * FROM sync_outbox WHERE sequence>?', [previousSequence])) {
     const frozen = materialize(db, row, row.client_id, row.sucursal_id);
     if (!frozen) throw new Error('No se pudo preparar la operación para sincronizar');
     if (Buffer.byteLength(JSON.stringify({ mutations: [{ payload: frozen.payload }] })) > MAX_REQUEST_BYTES - 8192) {
@@ -189,7 +193,7 @@ function freezeNewMutations(db, previousSequence) {
 function quarantine(db, row, message, code) {
   db.run("UPDATE sync_outbox SET state='QUARANTINED',last_error=?,warning_code=? WHERE sequence=?",
     [message, code, row.sequence]);
-  const targets = { sales: 'local_id', returns: 'local_id', cash_movements: 'local_id', cash_sessions: 'id' };
+  const targets = { sales: 'local_id', returns: 'local_id', cash_movements: 'local_id', cash_sessions: 'id', purchase_receipts: 'local_id', purchase_receipt_amendments: 'local_id' };
   if (targets[row.source_table]) db.run(`UPDATE ${row.source_table} SET sync_status='needs_review',sync_error=? WHERE ${targets[row.source_table]}=?`,
     [message, row.source_id]);
 }
@@ -208,6 +212,19 @@ function dueMutations(db, clientId, sucursalId, baseRequest, urgentBatch = null)
     if (urgentBatch && Number(row.sequence) > urgentBatch.maxSequence) continue;
     const frozen = materialize(db, row, clientId, sucursalId);
     if (!frozen) continue;
+    const dependencies = (frozen.payload.items || frozen.payload.receipt?.lines || [])
+      .filter(item => item.clientProductUuid && !item.newProduct);
+    const pendingProduct = dependencies.some(item => !db.get(`SELECT 1 FROM product_client_references
+      WHERE client_id=? AND sucursal_id=? AND client_product_uuid=? AND remote_product_id IS NOT NULL`,
+      [clientId, sucursalId, item.clientProductUuid]) && !db.get(`SELECT 1 FROM products
+      WHERE client_id=? AND sucursal_id=? AND client_product_uuid=? AND id>0`, [clientId, sucursalId, item.clientProductUuid]));
+    const pendingReceipt = row.mutation_type === 'PURCHASE_RECEIPT_AMOUNTS' && db.get(`SELECT 1 FROM purchase_receipts
+      WHERE client_id=? AND sucursal_id=? AND uuid=? AND sync_status<>'synced'`, [clientId, sucursalId, frozen.payload.receiptUuid]);
+    const pendingPrice = (frozen.payload.items || []).some(item => item.receiptPriceUuid && db.get('SELECT 1 FROM sync_outbox WHERE client_id=? AND sucursal_id=? AND idempotency_key=?', [clientId, sucursalId, item.receiptPriceUuid]));
+    if (pendingProduct || pendingReceipt || pendingPrice) {
+      if (frozen.payload.clientSessionUuid) blockedSessions.add(frozen.payload.clientSessionUuid);
+      continue;
+    }
     const sessionKey = row.mutation_type === 'CASH_SESSION_OPEN'
       ? row.idempotency_key : frozen.payload.clientSessionUuid;
     const retryAt = row.next_retry_at ? Date.parse(row.next_retry_at.replace(' ', 'T') + 'Z') : 0;
@@ -255,9 +272,17 @@ function pendingStockDelta(db, productId, clientId, sucursalId) {
        AND (o.client_id IS NULL OR o.client_id=?)
        AND (o.sucursal_id IS NULL OR o.sucursal_id=?)`,
   [productId, clientId, sucursalId])?.value || 0;
-  return Number(returned) - Number(sold);
+  const received = db.get(`SELECT COALESCE(SUM(l.quantity),0) value
+      FROM sync_outbox o JOIN purchase_receipt_lines l ON o.source_table='purchase_receipts' AND o.source_id=l.receipt_local_id
+      WHERE o.mutation_type='PURCHASE_RECEIPT' AND l.product_id=? AND o.client_id=? AND o.sucursal_id=?`, [productId, clientId, sucursalId])?.value || 0;
+  return Number(received) + Number(returned) - Number(sold);
 }
 
+function pendingReceiptQuantity(db, productId, clientId, sucursalId) {
+  return Number(db.get(`SELECT COALESCE(SUM(l.quantity),0) value FROM purchase_receipt_lines l
+    JOIN sync_outbox o ON o.source_table='purchase_receipts' AND o.source_id=l.receipt_local_id
+    WHERE o.mutation_type='PURCHASE_RECEIPT' AND l.product_id=? AND o.client_id=? AND o.sucursal_id=?`, [productId, clientId, sucursalId])?.value || 0);
+}
 function applyProduct(db, change, now, clientId, sucursalId) {
   if (change.action === 'DELETE' || !change.payload) {
     db.run('UPDATE products SET active=0,synced_at=? WHERE id=? AND client_id=? AND sucursal_id=?',
@@ -265,10 +290,27 @@ function applyProduct(db, change, now, clientId, sucursalId) {
     return;
   }
   const product = change.payload;
-  const cloudQuantity = Number(product.cloudQuantity ?? product.quantity ?? 0);
-  const tracksStock = !product.noCode && !product.weighable && product.stockTracked !== false;
-  const effectiveQuantity = cloudQuantity
+  if (product.clientProductUuid && db.get('SELECT 1 FROM products WHERE client_id=? AND sucursal_id=? AND client_product_uuid=? AND id<0', [clientId, sucursalId, product.clientProductUuid])) {
+    // A catalog download can see the cloud commit before a lost receipt ACK is retried.
+    // Keep the provisional stock until the original operation is acknowledged.
+    db.run('INSERT OR REPLACE INTO app_config(key,value) VALUES (?,?)',
+      [`deferred_receipt_product:${clientId}:${sucursalId}:${product.id}`, JSON.stringify(change)]);
+    return;
+  }
+  let cloudQuantity = Number(product.cloudQuantity ?? product.quantity ?? 0);
+  const local = db.get('SELECT * FROM products WHERE id=? AND client_id=? AND sucursal_id=?', [product.id, clientId, sucursalId]);
+  const revision = product.catalogRevision ?? change.revision;
+  if (revision != null && local && Number(local.catalog_revision) > Number(revision)) return;
+  const pendingReceipt = local && pendingReceiptQuantity(db, product.id, clientId, sucursalId) > 0;
+  const pendingPrice = local?.pending_price_receipt_uuid && db.get('SELECT 1 FROM sync_outbox WHERE client_id=? AND sucursal_id=? AND idempotency_key=?', [clientId, sucursalId, local.pending_price_receipt_uuid]);
+  const tracksStock = !product.weighable && product.stockTracked !== false;
+  let effectiveQuantity = cloudQuantity
     + (tracksStock ? pendingStockDelta(db, Number(product.id), clientId, sucursalId) : 0);
+  if (pendingReceipt) {
+    // Until the ACK, the cloud quantity may already contain this receipt.
+    // Keep the local stock instead of applying the same received units twice.
+    effectiveQuantity = local.quantity; cloudQuantity = local.cloud_quantity;
+  }
   db.run(`INSERT INTO products
     (id,code,no_code,stock_tracked,weighable,max_unit_price,name,description,price,cost,
      cost_derived,quantity,cloud_quantity,catalog_revision,price_proof,low_stock_threshold,
@@ -303,6 +345,15 @@ function applyProduct(db, change, now, clientId, sucursalId) {
   db.run(`UPDATE products SET wholesale_enabled=?,wholesale_configured=?,wholesale_price=?,wholesale_minimum_quantity=?,wholesale_price_proof=?
     WHERE id=? AND client_id=? AND sucursal_id=?`, [product.wholesaleEnabled ? 1 : 0, product.wholesaleConfigured ? 1 : 0,
     product.wholesalePrice ?? null, product.wholesaleMinimumQuantity ?? null, product.wholesalePriceProof || null, product.id, clientId, sucursalId]);
+  db.run('UPDATE products SET client_product_uuid=?,cost_pending=?,pricing_mode=?,target_markup_percent=? WHERE id=? AND client_id=? AND sucursal_id=?',
+    [product.clientProductUuid || null, product.costPending ? 1 : 0, product.pricingMode || 'MANUAL', product.targetMarkupPercent ?? null, product.id, clientId, sucursalId]);
+  if (pendingPrice || pendingReceipt) {
+    db.run('INSERT OR REPLACE INTO app_config(key,value) VALUES (?,?)', [`deferred_receipt_product:${clientId}:${sucursalId}:${product.id}`, JSON.stringify(change)]);
+  }
+  if (pendingPrice) {
+    db.run('UPDATE products SET price=?,cost=?,cost_pending=?,pricing_mode=?,target_markup_percent=?,price_proof=NULL WHERE id=?',
+      [local.price, local.cost, local.cost_pending, local.pricing_mode, local.target_markup_percent, product.id]);
+  } else db.run('UPDATE products SET pending_price_receipt_uuid=NULL WHERE id=?', [product.id]);
 }
 
 function applyRegister(db, change, now, clientId, sucursalId) {
@@ -331,6 +382,10 @@ function applyAck(db, outbox, result) {
   const body = result.result || {};
   const cloudId = result.cloudId || body.id || body.saleId || body.saleReturnId || null;
   switch (outbox.mutation_type) {
+    case 'PURCHASE_RECEIPT':
+    case 'PURCHASE_RECEIPT_AMOUNTS':
+      require('./purchase-receipt-sync').acknowledge(db, outbox, body);
+      break;
     case 'SALE': {
       const invoice = body.invoice || {};
       db.run(`UPDATE sales SET sync_status='synced',cloud_id=?,total_amount=COALESCE(?,total_amount),
@@ -401,6 +456,7 @@ function applyResponse(db, response, clientId, sucursalId) {
         const conflictTargets = {
           sales: ['sales', 'local_id'], returns: ['returns', 'local_id'],
           cash_movements: ['cash_movements', 'local_id'], cash_sessions: ['cash_sessions', 'id'],
+          purchase_receipts: ['purchase_receipts', 'local_id'], purchase_receipt_amendments: ['purchase_receipt_amendments', 'local_id'],
         };
         const target = conflictTargets[outbox.source_table];
         if (target) db.run(`UPDATE ${target[0]} SET sync_status='needs_review',sync_error=?
@@ -414,6 +470,15 @@ function applyResponse(db, response, clientId, sucursalId) {
       }
     }
 
+    for (const deferred of db.all('SELECT key,value FROM app_config WHERE key LIKE ?', [`deferred_receipt_product:${clientId}:${sucursalId}:%`])) {
+      const change = JSON.parse(deferred.value);
+      const priceReference = db.get('SELECT pending_price_receipt_uuid FROM products WHERE id=? AND client_id=? AND sucursal_id=?', [change.payload.id, clientId, sucursalId])?.pending_price_receipt_uuid;
+      if (!db.get('SELECT 1 FROM products WHERE client_id=? AND sucursal_id=? AND client_product_uuid=? AND id<0', [clientId, sucursalId, change.payload.clientProductUuid || null])
+          && !pendingReceiptQuantity(db, change.payload.id, clientId, sucursalId)
+          && (!priceReference || !db.get('SELECT 1 FROM sync_outbox WHERE client_id=? AND sucursal_id=? AND idempotency_key=?', [clientId, sucursalId, priceReference]))) {
+        applyProduct(db, change, now, clientId, sucursalId); db.run('DELETE FROM app_config WHERE key=?', [deferred.key]);
+      }
+    }
     if (response.resetRequired) {
       db.run('DELETE FROM sync_snapshot_changes WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
       db.run('UPDATE sync_state SET snapshot_in_progress=1 WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
@@ -429,7 +494,7 @@ function applyResponse(db, response, clientId, sucursalId) {
     if (snapshot && !response.hasMore) {
       changes = db.all('SELECT change_json FROM sync_snapshot_changes WHERE client_id=? AND sucursal_id=?',
         [clientId, sucursalId]).map((row) => JSON.parse(row.change_json));
-      db.run('UPDATE products SET active=0 WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
+      db.run('UPDATE products SET active=0 WHERE client_id=? AND sucursal_id=? AND id>0', [clientId, sucursalId]);
       db.run('UPDATE cash_registers SET active=0 WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
       db.run('UPDATE expense_categories SET active=0 WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
       db.run('DELETE FROM sync_snapshot_changes WHERE client_id=? AND sucursal_id=?', [clientId, sucursalId]);
@@ -558,4 +623,5 @@ module.exports = {
   MAX_MUTATIONS,
   MAX_REQUEST_BYTES,
   freezeNewMutations,
+  pendingStockDelta,
 };

@@ -6,7 +6,8 @@ const electronBinary = require('electron');
 const environment = { ...process.env };
 delete environment.ELECTRON_RUN_AS_NODE;
 
-const child = spawn(electronBinary, ['test/electron-regressions.js', '--dev'], {
+const script = process.argv.includes('--purchases') ? 'test/purchase-receipts-regressions.js' : 'test/electron-regressions.js';
+const child = spawn(electronBinary, [script, '--dev'], {
   cwd: process.cwd(),
   env: environment,
   stdio: 'inherit',

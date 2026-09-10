@@ -147,7 +147,7 @@ const SECURITY_HEADERS = {
   // necesita en prod) y se acota connect-src al backend Nuventa + loopback (antes `https:` permitía
   // exfiltrar a cualquier host). Se mantiene 'unsafe-inline' en script/style porque el export estático
   // de Next inyecta scripts/estilos inline y no admite nonces sin un build server (follow-up: nonces/hashes).
-  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; font-src 'self' data: https:; connect-src 'self' https://api.nuventa.com.ar https://*.nuventa.com.ar http://127.0.0.1:* http://localhost:*; frame-ancestors 'self'; base-uri 'self'; form-action 'self';",
+  'Content-Security-Policy': "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http://127.0.0.1:* http://localhost:*; font-src 'self' data: https:; connect-src 'self' https://api.nuventa.com.ar https://*.nuventa.com.ar http://127.0.0.1:* http://localhost:*; frame-src 'self' blob:; frame-ancestors 'self'; base-uri 'self'; form-action 'self';",
 };
 
 function serveStaticFile(urlPath, res) {
@@ -984,9 +984,11 @@ handlers['GET /sucursales'] = async (req, res, body, route) => {
 
 handlers['GET /items/:id'] = async (req, res, body, route, query, pathParams) => {
   const db = getDb();
+  const actualId = pathParams.id < 0 ? db.get('SELECT remote_product_id FROM product_client_references WHERE local_product_id=? AND client_id=? AND sucursal_id=?',
+    [pathParams.id, Number(getConfigVal(db, 'client_id')), Number(getConfigVal(db, 'sucursal_id'))])?.remote_product_id || pathParams.id : pathParams.id;
   const product = db.get(`SELECT * FROM products
     WHERE id = ? AND active = 1 AND client_id = ? AND sucursal_id = ?`, [
-    pathParams.id,
+    actualId,
     Number(getConfigVal(db, 'client_id')),
     Number(getConfigVal(db, 'sucursal_id')),
   ]);
@@ -1015,6 +1017,10 @@ function productToDto(p) {
     categoryIds: safeJsonParse(p.category_ids, []),
     subcategoryIds: safeJsonParse(p.subcategory_ids, []),
     costDerived: !!p.cost_derived,
+    costPending: !!p.cost_pending,
+    clientProductUuid: p.client_product_uuid || null,
+    pricingMode: p.pricing_mode || 'MANUAL',
+    targetMarkupPercent: p.target_markup_percent ?? null,
     noCode: !!p.no_code,
     // Pesable: el POS lo necesita para resolver el PLU de una etiqueta de balanza escaneada.
     weighable: !!p.weighable,
@@ -1162,7 +1168,7 @@ handlers['POST /sales'] = async (req, res, body) => {
     if (!Number.isInteger(q) || q < 1) {
       return jsonResponse(res, 400, { error: 'Cantidad inválida en un ítem (entero ≥ 1).' });
     }
-    if (it.productId != null && (!Number.isSafeInteger(Number(it.productId)) || Number(it.productId) <= 0)) {
+    if (it.productId != null && (!Number.isSafeInteger(Number(it.productId)) || Number(it.productId) === 0)) {
       return jsonResponse(res, 400, { error: 'Producto inválido.' });
     }
     if (it.unitPrice != null && (!Number.isFinite(Number(it.unitPrice)) || Number(it.unitPrice) < 0)) {
@@ -1189,16 +1195,22 @@ handlers['POST /sales'] = async (req, res, body) => {
   // venta caería en needs_review. Con la separación, el payload de sync queda idéntico al de hoy.
   const catalogClientId = Number(getConfigVal(db, 'client_id'));
   const catalogSucursalId = Number(getConfigVal(db, 'sucursal_id'));
+  const mappedProductId = (id) => Number(id) < 0 ? db.get('SELECT remote_product_id FROM product_client_references WHERE local_product_id=? AND client_id=? AND sucursal_id=?',
+    [Number(id), catalogClientId, catalogSucursalId])?.remote_product_id || Number(id) : Number(id);
   const requestedProductIds = [...new Set(items
-    .map((item) => item.productId == null ? null : Number(item.productId))
-    .filter((id) => Number.isSafeInteger(id) && id > 0))];
+    .map((item) => item.productId == null ? null : mappedProductId(item.productId))
+    .filter((id) => Number.isSafeInteger(id) && id !== 0))];
   const productRows = requestedProductIds.length
-    ? db.all(`SELECT id, name, code, price, weighable, stock_tracked, catalog_revision, price_proof, wholesale_enabled, wholesale_price, wholesale_minimum_quantity, wholesale_price_proof
+    ? db.all(`SELECT id, name, code, price, cost, cost_pending, client_product_uuid, pending_price_receipt_uuid, weighable, stock_tracked, catalog_revision, price_proof, wholesale_enabled, wholesale_price, wholesale_minimum_quantity, wholesale_price_proof
                 FROM products WHERE client_id = ? AND sucursal_id = ? AND active = 1
                  AND id IN (${requestedProductIds.map(() => '?').join(',')})`,
     [catalogClientId, catalogSucursalId, ...requestedProductIds])
     : [];
   const productsById = new Map(productRows.map((product) => [Number(product.id), product]));
+  for (const item of items) if (item.productId != null) {
+    const product = productsById.get(mappedProductId(item.productId));
+    if (product) productsById.set(Number(item.productId), product);
+  }
   const missingProduct = requestedProductIds.find((id) => !productsById.has(id));
   if (missingProduct != null) {
     return jsonResponse(res, 409, {
@@ -1207,8 +1219,8 @@ handlers['POST /sales'] = async (req, res, body) => {
   }
 
   const pricingQuantities = new Map();
-  for (const item of items) if (item.productId != null) pricingQuantities.set(Number(item.productId),
-    (pricingQuantities.get(Number(item.productId)) || 0) + Number(item.quantity));
+  for (const item of items) if (item.productId != null) pricingQuantities.set(mappedProductId(item.productId),
+    (pricingQuantities.get(mappedProductId(item.productId)) || 0) + Number(item.quantity));
   const onlineQuotes = safeJsonParse(getConfigVal(db, `product_price_quotes:${catalogClientId}:${catalogSucursalId}`), {});
   const resolvedItems = items.map((item) => {
     // R4-#8: los ítems INDEPENDIENTES (productId null) no están en el catálogo; traen customName y
@@ -1216,19 +1228,24 @@ handlers['POST /sales'] = async (req, res, body) => {
     // al sincronizar y la venta independiente offline quedaba atrapada en needs_review.
     const prod = item.productId != null ? productsById.get(Number(item.productId)) : null;
     const clientUnitPrice = item.unitPrice != null ? Number(item.unitPrice) : null;
-    const cachedQuote = onlineQuotes[item.productId];
-    const quote = prod && !prod.weighable && cachedQuote?.quantity === pricingQuantities.get(Number(item.productId))
+    const cachedQuote = prod?.pending_price_receipt_uuid ? null : onlineQuotes[item.productId];
+    const quote = prod && !prod.weighable && cachedQuote?.quantity === pricingQuantities.get(mappedProductId(item.productId))
       && Number.isFinite(cachedQuote.unitPrice) && cachedQuote.unitPrice > 0 && cachedQuote.priceProof ? cachedQuote : null;
     const catalogPrice = quote ? quote.unitPrice
-      : (prod ? require('./wholesale-pricing').wholesalePrice(prod, pricingQuantities.get(Number(item.productId))) : 0);
+      : (prod ? require('./wholesale-pricing').wholesalePrice(prod, pricingQuantities.get(mappedProductId(item.productId))) : 0);
     const isWholesale = prod && catalogPrice < Number(prod.price);
     return {
       ...item,
+      productId: prod ? prod.id : item.productId,
       productName: prod
         ? prod.name
         : (item.customName && String(item.customName).trim() ? String(item.customName).trim() : 'Producto'),
       productCode: prod ? prod.code : null,
       stockTracked: prod ? Number(prod.stock_tracked) !== 0 : false,
+      clientProductUuid: prod?.client_product_uuid || null,
+      receiptPriceUuid: !isWholesale && !quote ? prod?.pending_price_receipt_uuid || null : null,
+      unitCostAtSale: prod?.cost_pending ? null : (prod?.cost ?? null),
+      costPending: !!prod?.cost_pending,
       catalogRevision: quote ? quote.catalogRevision : (prod ? Number(prod.catalog_revision || 0) : null),
       priceProof: quote ? quote.priceProof : (prod ? (isWholesale ? prod.wholesale_price_proof : prod.price_proof) : null),
       wholesaleMinimumQuantity: quote ? quote.wholesaleMinimumQuantity : (isWholesale ? prod.wholesale_minimum_quantity : null),
@@ -1315,14 +1332,17 @@ handlers['POST /sales'] = async (req, res, body) => {
   for (const item of resolvedItems) {
     db.run(`
       INSERT INTO sale_items (sale_local_id, product_id, product_name, product_code, quantity,
-        unit_price, client_unit_price, catalog_revision, price_proof, wholesale_minimum_quantity)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        unit_price, client_unit_price, catalog_revision, price_proof, wholesale_minimum_quantity,
+        client_product_uuid, unit_cost_at_sale, cost_pending, receipt_price_uuid)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       localId, item.productId,
       item.productName,
       item.productCode,
       item.quantity, item.unitPrice, item.clientUnitPrice,
       item.catalogRevision, item.priceProof, item.wholesaleMinimumQuantity,
+      item.clientProductUuid, item.unitCostAtSale, item.costPending ? 1 : 0,
+      item.receiptPriceUuid,
     ]);
 
     // Decrement local stock. Los PESABLES quedan afuera igual que los no_code: se venden por kilo
@@ -1420,6 +1440,7 @@ handlers['GET /sales'] = async (req, res, body, route, query) => {
       items: items.map((i) => ({
         saleItemId: i.id,
         productId: i.product_id,
+        costPending: !!i.cost_pending,
         productName: i.product_name,
         quantity: i.quantity,
         unitPrice: i.unit_price,
@@ -1451,6 +1472,7 @@ function localSaleToDto(db, sale) {
     items: items.map((item) => ({
       saleItemId: item.id,
       productId: item.product_id,
+      costPending: !!item.cost_pending,
       productName: item.product_name,
       quantity: item.quantity,
       unitPrice: item.unit_price,
@@ -2204,6 +2226,7 @@ handlers['GET /cash-sessions/:id/sales'] = async (req, res, body, route, query, 
     ).map((item) => ({
       saleItemId: item.id,
       productId: item.product_id,
+      costPending: !!item.cost_pending,
       productName: item.product_name,
       quantity: item.quantity,
       unitPrice: item.unit_price,
@@ -2477,11 +2500,13 @@ handlers['POST /returns'] = async (req, res, body, route) => {
         product_name, product_code, quantity, unit_price)
       VALUES (?, ?, ?, ?, ?, ?, ?)
     `, [returnLocalId, vi.saleItemId, vi.productId, vi.productName, vi.productCode, vi.quantity, vi.unitPrice]);
+    db.run('UPDATE return_items SET client_product_uuid=(SELECT client_product_uuid FROM sale_items WHERE id=?) WHERE return_local_id=? AND sale_item_id=?',
+      [vi.saleItemId, returnLocalId, vi.saleItemId]);
 
     // Restore stock. Simétrico al descuento de la venta: a un pesable nunca se le descontó, así que
     // reintegrarlo acá inflaría el stock local en cada devolución.
     db.run(
-      'UPDATE products SET quantity = quantity + ? WHERE id = ? AND no_code = 0 AND weighable = 0',
+      'UPDATE products SET quantity = quantity + ? WHERE id = ? AND stock_tracked = 1 AND weighable = 0',
       [vi.quantity, vi.productId]
     );
   }
@@ -2834,7 +2859,7 @@ function routeRequest(method, pathname, route) {
   const cleanSubpath = subpath.split('?')[0];
 
   // /items/:id
-  const itemMatch = cleanSubpath.match(/^\/items\/(\d+)$/);
+  const itemMatch = cleanSubpath.match(/^\/items\/(-?\d+)$/);
   if (itemMatch && method === 'GET') {
     return { handler: handlers['GET /items/:id'], params: { id: Number(itemMatch[1]) } };
   }
@@ -2984,6 +3009,23 @@ function startLocalServer() {
         const route = parseRoute(req.url);
         const subpath = route.subpath.split('?')[0];
 
+        const receiptRoute = subpath === '/purchase-receipts' || subpath.startsWith('/purchase-receipts/');
+        if (receiptRoute) {
+          const receiptDb = getDb();
+          if (Number(route.clientId) !== Number(getConfigVal(receiptDb, 'client_id')) || Number(route.sucursalId) !== Number(getConfigVal(receiptDb, 'sucursal_id')))
+            return jsonResponse(res, 403, { message: 'El ingreso debe corresponder a la sucursal activa.' });
+          if (!canManageInventory()) return jsonResponse(res, 403, { message: 'No tenés permisos para ingresar mercadería.' });
+          if (req.method !== 'GET' && blockIfSessionRevoked(receiptDb, res)) return;
+          if (/^\/purchase-receipts\/documents\/[0-9a-f-]+\/files$/.test(subpath) && req.method === 'POST') {
+            if (!String(req.headers['content-type'] || '').startsWith('multipart/form-data;')) return jsonResponse(res, 415, { message: 'Usá multipart/form-data para subir la factura.' });
+            const raw = await parseRawBody(req, 21 * 1024 * 1024);
+            if (!raw) return jsonResponse(res, 413, { message: 'El comprobante supera 20 MB.' });
+            return await proxyToCloud(req, res, req.method, req.url, raw, { rawBody: true });
+          }
+          if (/^\/purchase-receipts\/documents\/[0-9a-f-]+\/files\/[0-9a-f-]+$/.test(subpath) && req.method === 'GET')
+            return await proxyToCloud(req, res, req.method, req.url, {}, { rawResponse: true });
+        }
+
         // Fiscal receipts are fetched online for printing, including cashier sessions.
         // Preserve PDF bytes; decoding them as text corrupts embedded fonts and images.
         const fiscalPdf = /^\/arca\/invoices\/\d+\/pdf$/.test(subpath);
@@ -3041,6 +3083,12 @@ function startLocalServer() {
         }
 
         // ── Role-based routing ────────────────────────────
+        if (receiptRoute) {
+          const receiptDb = getDb();
+          const scope = { clientId: Number(route.clientId), branchId: Number(route.sucursalId), employeeId: Number(getConfigVal(receiptDb, 'employee_id')), canPrice: isAdminOrOwner() };
+          return await require('./purchase-receipt-routes').handle({ req, res, body, query, subpath, db: receiptDb, scope,
+            apiClient, jsonResponse, proxyToCloud, authEpoch: apiClient.authEpoch });
+        }
         // Cloud-only routes (dashboard, reports, finance, employees, etc.)
         // Admin/Owner → proxy to cloud
         // Cajero/Inventario → 403 blocked
