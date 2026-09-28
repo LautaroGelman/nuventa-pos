@@ -121,7 +121,7 @@ jobs:
 
       - name: Set exact release version
         shell: pwsh
-        run: npm version '${{ inputs.version }}' --no-git-tag-version
+        run: npm version '${{ inputs.version }}' --no-git-tag-version --allow-same-version
 
       - name: Test POS and frontend
         shell: pwsh
