@@ -68,6 +68,10 @@ jobs:
       MS_STORE_FLIGHT_ID: ${{ secrets.MS_STORE_FLIGHT_ID }}
 
     steps:
+      - name: Preserve canonical source bytes on Windows
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
       - name: Checkout POS
         uses: actions/checkout@v4
 
