@@ -83,7 +83,7 @@ class AuthService {
    *
    * @returns {{ success, user, token, needsSync, error, isOffline }}
    */
-  async login(email, password, { onStatus } = {}) {
+  async login(email, password, { onStatus, legalNotice } = {}) {
     const db = getDb();
     const notify = onStatus || (() => {});
     this._pendingDeviceLogin = null;
@@ -96,7 +96,7 @@ class AuthService {
       // ── User exists locally ──
       if (isOnline) {
         notify({ step: 'remote-login', message: 'Verificando credenciales en la nube...' });
-        return await this._remoteLoginAndUpdate(email, password, localUser, notify);
+        return await this._remoteLoginAndUpdate(email, password, localUser, notify, legalNotice);
       } else {
         notify({ step: 'offline-login', message: 'Sin conexión. Verificando credenciales locales...' });
         return this._offlineLogin(email, password, localUser);
@@ -105,7 +105,7 @@ class AuthService {
       // ── User NOT in local DB ──
       if (isOnline) {
         notify({ step: 'first-login', message: 'Primer inicio de sesión. Conectando al servidor...' });
-        return await this._firstRemoteLogin(email, password, notify);
+        return await this._firstRemoteLogin(email, password, notify, legalNotice);
       } else {
         return {
           success: false,
@@ -119,9 +119,9 @@ class AuthService {
   /**
    * Remote login + update existing local user data.
    */
-  async _remoteLoginAndUpdate(email, password, localUser, notify) {
+  async _remoteLoginAndUpdate(email, password, localUser, notify, legalNotice) {
     try {
-      let result = await apiClient.login(email, password);
+      let result = await apiClient.login(email, password, false, legalNotice);
 
       // Handle 403 responses from backend
       if (result && result._httpStatus === 403) {
@@ -130,7 +130,7 @@ class AuthService {
 
       // Handle 409 active session conflict — force logout and retry
       if (result && result._httpStatus === 409) {
-        const forceResult = await this._handleActiveSessionConflict(email, password, localUser, notify);
+        const forceResult = await this._handleActiveSessionConflict(email, password, localUser, notify, legalNotice);
         if (forceResult.success === false) return forceResult;
         result = forceResult; // Use the successful retry result
       }
@@ -145,6 +145,8 @@ class AuthService {
       const jwt = parseJwt(result.token);
       this._saveUserLocally(email, password, result, jwt);
       this._configureApiClient(result, jwt);
+      try { await require('./business-ui-preferences').syncPreferences(getDb(), apiClient, Number(apiClient.clientId)); }
+      catch (error) { console.warn('[AUTH] Business preferences refresh unavailable:', error.message); }
 
       // Check if branch data needs sync
       const needsSync = await this._checkBranchDataStatus(result.sucursalId, result.clientId, notify);
@@ -160,6 +162,7 @@ class AuthService {
       };
     } catch (err) {
       // Network error — fall back to offline login
+      if (err.code === 'LEGAL_DOCUMENT_CHANGED' || (err.status >= 400 && err.status < 500)) return { success: false, error: err.message };
       console.warn('[AUTH] Remote login failed, falling back to offline:', err.message);
       notify({ step: 'offline-fallback', message: 'Error de conexión. Usando credenciales locales...' });
       return this._offlineLogin(email, password, localUser);
@@ -169,9 +172,9 @@ class AuthService {
   /**
    * First-time remote login — user doesn't exist locally yet.
    */
-  async _firstRemoteLogin(email, password, notify) {
+  async _firstRemoteLogin(email, password, notify, legalNotice) {
     try {
-      let result = await apiClient.login(email, password);
+      let result = await apiClient.login(email, password, false, legalNotice);
 
       // Handle 403 responses from backend
       if (result && result._httpStatus === 403) {
@@ -180,7 +183,7 @@ class AuthService {
 
       // Handle 409 active session conflict — force logout and retry
       if (result && result._httpStatus === 409) {
-        const forceResult = await this._handleActiveSessionConflict(email, password, null, notify);
+        const forceResult = await this._handleActiveSessionConflict(email, password, null, notify, legalNotice);
         if (forceResult.success === false) return forceResult;
         result = forceResult;
       }
@@ -194,6 +197,8 @@ class AuthService {
       const jwt = parseJwt(result.token);
       this._saveUserLocally(email, password, result, jwt);
       this._configureApiClient(result, jwt);
+      try { await require('./business-ui-preferences').syncPreferences(getDb(), apiClient, Number(apiClient.clientId)); }
+      catch (error) { console.warn('[AUTH] Business preferences refresh unavailable:', error.message); }
 
       // First login — always need to check/download branch data
       notify({ step: 'checking-branch', message: 'Verificando datos de la sucursal...' });
@@ -388,10 +393,10 @@ class AuthService {
   /**
    * Handle 409 active session conflict — auto-retry with forceLogout.
    */
-  async _handleActiveSessionConflict(email, password, localUser, notify) {
+  async _handleActiveSessionConflict(email, password, localUser, notify, legalNotice) {
     notify({ step: 'force-login', message: 'Sesión activa en otro dispositivo. Cerrando sesión anterior...' });
     try {
-      const result = await apiClient.login(email, password, true); // forceLogout = true
+      const result = await apiClient.login(email, password, true, legalNotice); // forceLogout = true
       if (result && result._httpStatus === 403) return this._handle403(result, email, password);
       if (result && result._httpStatus === 409) {
         return { success: false, error: 'No se pudo cerrar la sesión anterior. Intentá de nuevo.' };
@@ -408,10 +413,10 @@ class AuthService {
   /**
    * Complete a cloud login after the user validates the new-device email code.
    */
-  async verifyDevice(email, code, forceLogout = false, { onStatus } = {}) {
+  async verifyDevice(email, code, forceLogout = false, { onStatus, legalNotice } = {}) {
     const notify = onStatus || (() => {});
     try {
-      const result = await apiClient.verifyDevice(email, code, forceLogout);
+      const result = await apiClient.verifyDevice(email, code, forceLogout, legalNotice);
       if (result && result._httpStatus) {
         return {
           ...result,
@@ -438,6 +443,8 @@ class AuthService {
       const jwt = parseJwt(result.token);
       this._saveUserLocally(email, pending.password, result, jwt);
       this._configureApiClient(result, jwt);
+      try { await require('./business-ui-preferences').syncPreferences(getDb(), apiClient, Number(apiClient.clientId)); }
+      catch (error) { console.warn('[AUTH] Business preferences refresh unavailable:', error.message); }
       const needsSync = await this._checkBranchDataStatus(result.sucursalId, result.clientId, notify);
       this._currentUser = this._buildUserObject(result, jwt, email);
       this._pendingDeviceLogin = null;

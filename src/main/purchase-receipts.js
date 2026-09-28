@@ -26,10 +26,20 @@ function view(row, db) {
   return result;
 }
 function get(db, scope, id) { const row = find(db, scope, id); if (!row) throw error(404, 'Ingreso no encontrado'); return view(row, db); }
-function list(db, scope, page = 0, size = 30) {
+function list(db, scope, page = 0, size = 30, filter = 'ALL', remoteIds) {
+  if (!['ALL', 'DRAFT', 'AMOUNT_PENDING'].includes(filter)) throw error(400, 'Filtro inválido');
   const offset = Math.max(0, Math.trunc(Number(page) || 0)) * size;
-  const total = db.get('SELECT COUNT(*) n FROM purchase_receipts WHERE client_id=? AND sucursal_id=?', [scope.clientId, scope.branchId]).n;
-  return { content: db.all('SELECT * FROM purchase_receipts WHERE client_id=? AND sucursal_id=? ORDER BY created_at DESC,local_id DESC LIMIT ? OFFSET ?', [scope.clientId, scope.branchId, size, offset]).map(row => view(row, db)), totalPages: Math.ceil(total / size) };
+  let where = "client_id=? AND sucursal_id=? AND (?='ALL' OR (?='DRAFT' AND state='DRAFT') OR (?='AMOUNT_PENDING' AND state='CONFIRMED' AND json_extract(receipt_json,'$.totalAmount') IS NULL))";
+  const args = [scope.clientId, scope.branchId, filter, filter, filter];
+  // Online filtered results are authoritative for synchronized rows. A cached
+  // draft may have been confirmed on another device; keep only local mutations
+  // plus the matching cloud rows, without deleting the offline history.
+  if (remoteIds) {
+    where += " AND (sync_status<>'synced' OR EXISTS(SELECT 1 FROM purchase_receipt_amendments a WHERE a.receipt_local_id=purchase_receipts.local_id AND a.sync_status<>'synced') OR uuid IN (SELECT value FROM json_each(?)))";
+    args.push(JSON.stringify(remoteIds));
+  }
+  const total = db.get('SELECT COUNT(*) n FROM purchase_receipts WHERE '+where, args).n;
+  return { content: db.all('SELECT * FROM purchase_receipts WHERE '+where+' ORDER BY created_at DESC,local_id DESC LIMIT ? OFFSET ?', [...args, size, offset]).map(row => view(row, db)), totalPages: Math.ceil(total / size), totalElements: total };
 }
 function empty(scope, id) {
   return { uuid: id, version: 0, clientId: scope.clientId, sucursalId: scope.branchId, employeeId: scope.employeeId,
@@ -43,7 +53,11 @@ function saveDraft(db, scope, id, draft) {
   return db.transaction(() => {
     const previous = find(db, scope, id);
     if (previous?.state === 'CONFIRMED') throw error(409, 'El ingreso ya está confirmado');
-    if (previous) db.run('UPDATE purchase_receipts SET draft_json=? WHERE local_id=?', [JSON.stringify(draft), previous.local_id]);
+    if (previous) {
+      const changed = canonicalJson(draft) !== canonicalJson(previous.draft_json ? JSON.parse(previous.draft_json) : null);
+      db.run('UPDATE purchase_receipts SET draft_json=?,sync_status=? WHERE local_id=?',
+        [JSON.stringify(draft), changed ? 'pending' : previous.sync_status, previous.local_id]);
+    }
     else db.run(`INSERT INTO purchase_receipts(uuid,client_id,sucursal_id,employee_id,draft_json,receipt_json,created_at)
       VALUES (?,?,?,?,?,?,?)`, [id, scope.clientId, scope.branchId, scope.employeeId, JSON.stringify(draft), JSON.stringify(empty(scope, id)), now()]);
     return get(db, scope, id);
@@ -97,7 +111,7 @@ function reconcile(receipt) {
   if (receipt.adjustmentAmount && !receipt.adjustmentReason?.trim()) throw error(400, 'Explicá el ajuste');
   const lines = receipt.lines.filter(line => line.decision === 'RECEIVE');
   receipt.amountStatus = receipt.totalAmount == null ? 'AMOUNT_PENDING' : 'COMPLETE';
-  receipt.costStatus = lines.some(line => line.lineAmount == null || line.priceDecision === 'REVIEW_REQUIRED') ? 'COSTS_PENDING' : 'COMPLETE';
+  receipt.costStatus = lines.some(line => line.stockState !== 'REVERSED' && (line.lineAmount == null || line.priceDecision === 'REVIEW_REQUIRED')) || Object.values(receipt.pricingEffects || {}).some(e => e.reason) ? 'COSTS_PENDING' : 'COMPLETE';
   if (receipt.totalAmount != null && lines.every(line => line.lineAmount != null)) {
     const sum = lines.reduce((n, line) => n + Math.round(line.lineAmount * 100), 0) + Math.round((receipt.adjustmentAmount || 0) * 100);
     if (sum !== Math.round(receipt.totalAmount * 100)) throw error(400, 'El total no coincide. Revisá el ajuste o dejá el importe pendiente');
@@ -152,8 +166,11 @@ function confirm(db, scope, request) {
       }
       const units = lines.reduce((n, line) => n + line.receivedUnits, 0);
       if (!Number.isSafeInteger(units) || Number(product.quantity) + units > 2147483647) throw error(400, 'Cantidad fuera de rango');
-      const cost = lines.some(line => line.lineAmount == null) ? null : pricing.unitCost(lines.reduce((n, line) => n + line.lineAmount, 0), units);
+      const allocated = require('./purchase-receipt-corrections').allocatedAmounts(receipt);
+      const cost = lines.some(line => line.lineAmount == null) ? null : pricing.unitCost(lines.reduce((n, line) => n + allocated.get(line.uuid), 0), units);
+      const beforePricing = require('./purchase-receipt-corrections').snapshot(product);
       applyPrice(db, scope, product, cost, input);
+      require('./purchase-receipt-corrections').recordPricing(db, receipt, product.id, beforePricing, true, request.uuid, scope.employeeId);
       if (input.newProduct || (input.priceDecision && input.priceDecision !== 'KEEP')) db.run('UPDATE products SET pending_price_receipt_uuid=? WHERE id=?', [request.uuid, product.id]);
       let running = Number(product.quantity);
       for (const line of lines) { line.stockBefore = running; running += line.receivedUnits; line.stockAfter = running; line.appliedPrice = product.price; }
@@ -193,19 +210,23 @@ function complete(db, scope, receiptUuid, request) {
       money(change.lineAmount); if (change.lineAmount == null) throw error(400, 'Falta el importe de la línea');
       line.lineAmount = change.lineAmount; line.unitCost = pricing.unitCost(change.lineAmount, line.invoiceQuantity, line.unitsPerPack); changes.set(change.lineUuid, change);
     }
-    const productIds = [...new Set(receipt.lines.filter(line => changes.has(line.uuid)).map(line => line.productId))];
+    const productIds = [...new Set(receipt.lines.filter(line => changes.has(line.uuid) && line.stockState !== 'REVERSED').map(line => line.productId))];
     for (const productId of productIds) {
-      const lines = receipt.lines.filter(line => line.productId === productId && line.decision === 'RECEIVE');
+      const lines = receipt.lines.filter(line => line.productId === productId && line.decision === 'RECEIVE' && line.stockState !== 'REVERSED');
+      if (!lines.length) continue;
       const input = changes.get(lines.find(line => changes.has(line.uuid)).uuid);
       for (const line of lines) {
         const other = changes.get(line.uuid);
         if (other && canonicalJson([other.priceDecision, other.expectedPricing, other.reviewedSalePrice]) !== canonicalJson([input.priceDecision, input.expectedPricing, input.reviewedSalePrice])) throw error(400, 'Unificá la revisión de precio del producto');
       }
       const units = lines.reduce((n, line) => n + line.receivedUnits, 0);
-      const cost = lines.some(line => line.lineAmount == null) ? null : pricing.unitCost(lines.reduce((n, line) => n + line.lineAmount, 0), units);
+      const allocated = require('./purchase-receipt-corrections').allocatedAmounts(receipt);
+      const cost = lines.some(line => line.lineAmount == null) ? null : pricing.unitCost(lines.reduce((n, line) => n + allocated.get(line.uuid), 0), units);
       const product = db.get('SELECT * FROM products WHERE id=? AND client_id=? AND sucursal_id=? AND active=1', [productId, scope.clientId, scope.branchId]);
       if (!product) throw error(409, 'El producto ya no está activo. Revisá sus importes');
+      const beforePricing = require('./purchase-receipt-corrections').snapshot(product);
       applyPrice(db, scope, product, cost, input);
+      require('./purchase-receipt-corrections').recordPricing(db, receipt, product.id, beforePricing, false, request.mutationUuid, scope.employeeId);
       if (input.priceDecision && input.priceDecision !== 'KEEP') db.run('UPDATE products SET pending_price_receipt_uuid=? WHERE id=?', [request.mutationUuid, product.id]);
       for (const line of lines) { line.priceDecision = input.priceDecision || 'KEEP'; line.appliedPrice = product.price; }
     }

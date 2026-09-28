@@ -890,6 +890,20 @@ function runMigrations() {
     db.run('ALTER TABLE products ADD COLUMN pending_price_receipt_uuid TEXT');
     db.run('ALTER TABLE sale_items ADD COLUMN receipt_price_uuid TEXT');
   });
+  applyMigration(17, 'receipt_corrections_and_stock_warnings', () => {
+    db.run('ALTER TABLE products ADD COLUMN pricing_revision INTEGER NOT NULL DEFAULT 0');
+    db.run('ALTER TABLE sale_items ADD COLUMN stock_before INTEGER');
+    db.run("ALTER TABLE purchase_receipt_amendments ADD COLUMN kind TEXT NOT NULL DEFAULT 'AMOUNTS'");
+    db.run('ALTER TABLE purchase_receipt_amendments ADD COLUMN result_json TEXT');
+    db.run(`CREATE TABLE purchase_receipt_correction_deltas (
+      amendment_id INTEGER NOT NULL REFERENCES purchase_receipt_amendments(local_id),
+      product_id INTEGER NOT NULL, client_product_uuid TEXT, delta INTEGER NOT NULL,
+      PRIMARY KEY(amendment_id,product_id))`);
+    db.run(`CREATE TRIGGER product_pricing_revision AFTER UPDATE OF cost,price,cost_pending,cost_derived,pricing_mode,target_markup_percent ON products
+      WHEN NEW.pricing_revision=OLD.pricing_revision AND (NEW.cost IS NOT OLD.cost OR NEW.price IS NOT OLD.price OR NEW.cost_pending IS NOT OLD.cost_pending OR NEW.cost_derived IS NOT OLD.cost_derived OR NEW.pricing_mode IS NOT OLD.pricing_mode OR NEW.target_markup_percent IS NOT OLD.target_markup_percent)
+      BEGIN UPDATE products SET pricing_revision=OLD.pricing_revision+(NEW.cost IS NOT OLD.cost)+(NEW.price IS NOT OLD.price)+(NEW.cost_pending IS NOT OLD.cost_pending)+(NEW.cost_derived IS NOT OLD.cost_derived)+(NEW.pricing_mode IS NOT OLD.pricing_mode)+(NEW.target_markup_percent IS NOT OLD.target_markup_percent) WHERE id=NEW.id; END`);
+  });
+
 }
 
 function applyMigration(version, name, migrate) {

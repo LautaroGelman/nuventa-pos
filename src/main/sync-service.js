@@ -179,6 +179,9 @@ class SyncService extends EventEmitter {
       const stillSameAuth = () => apiClient.authEpoch === epoch;
 
       const db = getDb();
+      try { await require('./business-ui-preferences').syncPreferences(db, apiClient, syncIdentity.clientId); }
+      catch (error) { console.warn('[SYNC] Business preferences refresh unavailable:', error.message); }
+      if (!stillSameAuth()) return;
       try { await require('./product-form-preferences').syncPreferences(db, apiClient, syncIdentity.clientId, syncIdentity.sucursalId); }
       catch (error) { console.warn('[SYNC] Product form preferences pending:', error.message); }
       if (!stillSameAuth()) return;
@@ -245,7 +248,7 @@ class SyncService extends EventEmitter {
       }
 
       if (db.get(`SELECT 1 FROM sync_outbox WHERE client_id=? AND sucursal_id=?
-          AND mutation_type IN ('PURCHASE_RECEIPT','PURCHASE_RECEIPT_AMOUNTS') LIMIT 1`, [syncIdentity.clientId, syncIdentity.sucursalId])) {
+          AND mutation_type IN ('PURCHASE_RECEIPT','PURCHASE_RECEIPT_AMOUNTS','PURCHASE_RECEIPT_CORRECTION') LIMIT 1`, [syncIdentity.clientId, syncIdentity.sucursalId])) {
         throw new Error('Hay ingresos pendientes que requieren el backend compatible con Compras. Las operaciones siguen guardadas en este equipo.');
       }
       // 1. Upload pending sales (local → cloud)

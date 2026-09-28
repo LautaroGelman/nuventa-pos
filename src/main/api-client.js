@@ -228,7 +228,7 @@ class ApiClient extends EventEmitter {
 
   // ── Auth ─────────────────────────────────────────────
 
-  async login(email, password, forceLogout = false) {
+  async login(email, password, forceLogout = false, legalNotice) {
     const url = `${this.baseUrl}/api/auth/login?forceLogout=${forceLogout}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -236,15 +236,20 @@ class ApiClient extends EventEmitter {
       const res = await fetch(url, {
         method: 'POST',
         headers: this._headers(),
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, employeeTermsVersion: legalNotice?.employeeTermsVersion, employeeTermsHash: legalNotice?.employeeTermsHash }),
         signal: controller.signal,
       });
       clearTimeout(timeout);
       const text = await res.text();
       const body = text ? JSON.parse(text) : null;
+      if (body?.code === 'LEGAL_DOCUMENT_CHANGED') {
+        const error = new Error(body.message || 'Actualizá Nuventa para revisar los documentos legales.');
+        error.code = 'LEGAL_DOCUMENT_CHANGED';
+        throw error;
+      }
       if (res.status === 403) return { ...body, _httpStatus: 403 };
       if (res.status === 409) return { ...body, _httpStatus: 409, activeSessionConflict: true };
-      if (!res.ok) throw new Error(`HTTP ${res.status}: ${text}`);
+      if (!res.ok) throw Object.assign(new Error(`HTTP ${res.status}: ${text}`), { status: res.status });
       return body;
     } catch (err) {
       clearTimeout(timeout);
@@ -252,7 +257,7 @@ class ApiClient extends EventEmitter {
     }
   }
 
-  async verifyDevice(email, code, forceLogout = false) {
+  async verifyDevice(email, code, forceLogout = false, legalNotice) {
     const url = `${this.baseUrl}/api/auth/verify-device?forceLogout=${forceLogout}`;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
@@ -260,7 +265,7 @@ class ApiClient extends EventEmitter {
       const res = await fetch(url, {
         method: 'POST',
         headers: this._headers(),
-        body: JSON.stringify({ email, code }),
+        body: JSON.stringify({ email, code, employeeTermsVersion: legalNotice?.employeeTermsVersion, employeeTermsHash: legalNotice?.employeeTermsHash }),
         signal: controller.signal,
       });
       clearTimeout(timeout);

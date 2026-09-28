@@ -1,0 +1,274 @@
+NUVENTA
+TÉRMINOS DE USO PARA USUARIOS AUTORIZADOS
+Aceptación Requerida al Primer Acceso
+
+Versión: 1.0 | Fecha de vigencia: 17/02/2026 | Incluye cláusulas de confidencialidad y protección de propiedad intelectual
+
+⚠ AVISO IMPORTANTE
+Usted ha sido autorizado por su empleador/organización (en adelante, el “Usuario Administrador”) para acceder a la plataforma NUVENTA.
+Es importante que comprenda la naturaleza de esta relación: su acceso está mediado por su empleador, quien contrató directamente con NUVENTA. Usted no contrata directamente con NUVENTA ni tiene obligaciones de pago hacia la plataforma. Sin embargo, al aceptar estos términos, usted asume compromisos directos hacia NUVENTA en materia de confidencialidad, uso adecuado del sistema y protección de la propiedad intelectual de la plataforma, independientemente de su relación con su empleador.
+Al hacer clic en “Aceptar” o marcar la casilla de verificación, usted acepta los siguientes términos de uso y se compromete a cumplirlos durante todo el período de su acceso autorizado y con posterioridad al mismo según los plazos establecidos en cada sección.
+
+1. CONDICIÓN DE USUARIO AUTORIZADO
+1.1. USUARIO AUTORIZADO
+Toda persona humana habilitada por el Usuario Administrador para acceder a la Plataforma NUVENTA, incluyendo:
+•	a) Empleados en relación de dependencia
+•	b) Consultores, asesores o contratistas bajo contrato de servicios profesionales
+•	c) Socios, directores o personas con función ejecutiva en la organización
+•	d) Personal temporal o pasantes autorizados
+Quedan expresamente EXCLUIDOS de esta definición:
+•	Colaboradores comerciales independientes del Programa de Afiliados (Vendedores), quienes se rigen por Contrato de Colaboración separado
+•	Terceros sin autorización expresa del Usuario Administrador
+1.2. Su acceso está sujeto a la autorización continua del Usuario Administrador, quien puede revocarla en cualquier momento sin previo aviso.
+1.3. El Usuario Administrador es responsable del pago del servicio. Usted no tiene relación contractual directa con NUVENTA respecto del pago.
+
+2. USO AUTORIZADO DE LA PLATAFORMA
+2.1. Usted se compromete a utilizar NUVENTA exclusivamente para los fines laborales autorizados por su empleador/organización.
+2.2. Queda expresamente prohibido:
+•	Utilizar la plataforma para fines personales o ajenos a la actividad de su empleador.
+•	Compartir sus credenciales de acceso (usuario y contraseña) con terceros.
+•	Intentar acceder a datos, funcionalidades o módulos no autorizados para su perfil.
+•	Extraer, copiar o exportar datos de la plataforma sin autorización expresa del Usuario Administrador.
+•	Modificar, alterar o manipular datos de manera no autorizada.
+•	Utilizar la plataforma para actividades ilícitas, fraudulentas o que violen derechos de terceros.
+•	Realizar ingeniería inversa, descompilar o intentar obtener el código fuente de la plataforma.
+•	Realizar pruebas de penetración, escaneo de vulnerabilidades o cualquier actividad de hacking ético sin autorización expresa y por escrito de NUVENTA.
+•	Documentar, registrar, capturar pantallas o grabar la arquitectura técnica, funcionalidades internas o metodologías del sistema con fines de replicación o desarrollo de sistemas competidores.
+
+3. RESPONSABILIDAD POR EL USO DE CREDENCIALES
+3.1. Usted es responsable de mantener la confidencialidad de sus credenciales de acceso (usuario y contraseña).
+3.2. Debe utilizar una contraseña segura (mínimo 8 caracteres, combinando mayúsculas, minúsculas, números y símbolos).
+3.3. Las actividades realizadas con sus credenciales serán atribuidas a usted. Sin embargo, si demuestra mediante evidencia razonable que sus credenciales fueron comprometidas sin su culpa o negligencia, no será responsable por el uso indebido, siempre que haya notificado inmediatamente.
+3.4. Si sospecha que sus credenciales han sido comprometidas, debe:
+•	Notificar inmediatamente al Usuario Administrador de su organización.
+•	Cambiar su contraseña de acceso sin demora.
+•	Colaborar en cualquier investigación de seguridad que se inicie.
+
+4. PRIVACIDAD Y PROTECCIÓN DE DATOS
+4.1. Al acceder a NUVENTA, usted acepta que la plataforma recopile los siguientes datos personales sobre su actividad:
+•	Su nombre y apellido, dirección de email y rol/perfil asignado.
+•	Registro de accesos (fecha, hora, dirección IP).
+•	Acciones realizadas dentro de la plataforma (logs de auditoría).
+•	Datos de sesión y autenticación.
+4.2. Estos datos serán tratados conforme la Política de Privacidad de NUVENTA (disponible en www.nuventa.com.ar/politica-de-privacidad-clientes) y la Ley 25.326 de Protección de Datos Personales.
+4.3. Los datos de auditoría pueden ser compartidos con el Usuario Administrador de su organización para fines de supervisión laboral, control interno y cumplimiento normativo. NUVENTA actúa como proveedor técnico de la plataforma y no es responsable del uso que el empleador haga de dichos registros de auditoría. Toda responsabilidad por el uso, tratamiento y aplicación de los datos de monitoreo en el contexto de la relación laboral recae exclusivamente sobre el Usuario Administrador (su empleador), quien debe cumplir con las normativas laborales y de protección de datos aplicables.
+4.4. Ejercicio de Derechos ARCO (Acceso, Rectificación, Cancelación y Oposición):
+Conforme el artículo 14 de la Ley 25.326, usted tiene derecho a acceder, rectificar, actualizar o suprimir sus datos personales.
+Respecto de sus datos personales recopilados por NUVENTA (nombre, email, logs de acceso, IP, datos de sesión):
+•	Puede ejercer sus derechos ARCO directamente ante NUVENTA escribiendo a nuventaargentina@gmail.com con asunto "[ARCO - Usuario Autorizado]".
+•	NUVENTA responderá dentro de 10 días hábiles conforme lo establece la normativa vigente.
+Respecto de datos laborales ingresados por su empleador (evaluaciones de desempeño, asignaciones, permisos específicos):
+•	Debe dirigirse al Usuario Administrador de su organización, quien actúa como Responsable del Tratamiento de dichos datos.
+En caso de duda sobre a quién dirigirse, puede contactar a ambas partes. NUVENTA le orientará sobre el responsable correspondiente según el tipo de dato.
+4.5. Usted conserva en todo momento el derecho de presentar reclamos ante la Agencia de Acceso a la Información Pública (AAIP) si considera que sus derechos han sido vulnerados.
+
+5. CONFIDENCIALIDAD DE INFORMACIÓN DEL EMPLEADOR
+5.1. Toda información a la que acceda en NUVENTA (datos comerciales, financieros, de clientes, proveedores, estratégicos) es confidencial y propiedad de su empleador/organización.
+5.2. Usted se compromete a:
+•	No divulgar información confidencial a terceros sin autorización.
+•	No utilizar información confidencial para beneficio propio o de terceros.
+•	Mantener la confidencialidad durante su relación laboral o contractual y por un plazo de dos (2) años posteriores a su finalización.
+5.3. La obligación de confidencialidad no aplica a información que:
+•	Sea de dominio público sin culpa o intervención del Usuario Autorizado.
+•	Deba divulgarse por orden judicial, requerimiento legal o autoridad competente.
+•	Sea conocimiento general de la industria o sector.
+
+6. MONITOREO Y AUDITORÍA
+6.1. NUVENTA registra automáticamente acciones técnicas realizadas en la plataforma (logs de auditoría) para fines de seguridad, prevención de fraude y cumplimiento normativo.
+6.2. El monitoreo técnico se limita a:
+•	Registro de accesos: fecha, hora, dirección IP, dispositivo utilizado.
+•	Módulos y secciones de la plataforma visitados.
+•	Acciones ejecutadas: creación, modificación, eliminación de registros.
+•	Uso de funcionalidades: reportes generados, exportaciones realizadas.
+6.3. El monitoreo NO incluye:
+•	Contenido de comunicaciones privadas o personales fuera de la plataforma.
+•	Monitoreo de actividad fuera del horario laboral (salvo accesos explícitos a la plataforma).
+•	Seguimiento de ubicación física o geolocalización más allá de la dirección IP de conexión.
+•	Acceso a información protegida por secreto profesional, gremial o datos sensibles (Art. 7 y 14 Ley 25.326).
+6.4. Los datos de monitoreo serán utilizados exclusivamente para:
+•	Seguridad informática y prevención de accesos no autorizados.
+•	Auditoría interna de cumplimiento normativo (contable, fiscal, laboral).
+•	Investigación de incidentes de seguridad o uso indebido comprobado.
+•	Mejora técnica de la plataforma (de manera anonimizada).
+6.5. Su empleador/organización tiene derecho a revisar su actividad registrada en la plataforma para fines de supervisión laboral legítima, siempre que respete los límites establecidos en esta sección y la normativa laboral vigente.
+6.6. Usted consiente expresamente este monitoreo limitado como condición de su acceso autorizado, reconociendo que las limitaciones establecidas en los puntos 6.2, 6.3 y 6.4 protegen su derecho a la intimidad conforme la Ley 25.326.
+
+7. TERMINACIÓN DEL ACCESO
+7.1. Su acceso a NUVENTA puede ser revocado en cualquier momento por:
+•	Decisión del Usuario Administrador de su organización.
+•	Finalización de su relación laboral o contractual con la organización.
+•	Incumplimiento de estos términos.
+•	Uso indebido o no autorizado de la plataforma.
+•	Cancelación del servicio por parte del Usuario Administrador.
+7.2. Al cesar su acceso, debe abstenerse inmediatamente de cualquier intento de ingreso a la plataforma y devolver cualquier documentación o archivo descargado.
+7.3. Las obligaciones de confidencialidad y no competencia establecidas en las Secciones 13 y 14 de este documento permanecen vigentes incluso después de la terminación de su acceso.
+
+8. LIMITACIÓN DE RESPONSABILIDAD
+8.1. NUVENTA proporciona la plataforma "tal cual está" (as-is). No garantiza disponibilidad ininterrumpida ni ausencia de errores, pero mantiene sus obligaciones de seguridad conforme el artículo 9 de la Ley 25.326.
+8.2. Usted es responsable de realizar copias de seguridad de su trabajo si su perfil lo permite y de verificar la exactitud de los datos que ingresa.
+8.3. NUVENTA no será responsable por:
+•	Pérdida de datos causada exclusivamente por errores del usuario, caso fortuito o fuerza mayor.
+•	Daños derivados del uso indebido, negligente o contrario a estos términos.
+•	Conflictos laborales entre usted y su empleador/organización.
+•	Decisiones laborales tomadas por su empleador basadas en su actividad en la plataforma, siempre que el monitoreo respete los límites de la Sección 6.
+8.4. NUVENTA mantiene su responsabilidad por:
+•	Fallas técnicas causadas por negligencia o falta de mantenimiento razonable de la plataforma.
+•	Incumplimiento de las medidas de seguridad técnicas y organizativas conforme el artículo 9 de la Ley 25.326 y Resolución AAIP 47/2018.
+•	Violaciones a sus derechos de privacidad derivadas de acciones u omisiones directas de NUVENTA.
+•	Daños causados con dolo o culpa grave.
+8.5. Esta limitación de responsabilidad no afecta derechos irrenunciables establecidos en la Ley 24.240 de Defensa del Consumidor ni en la legislación laboral argentina.
+
+9. MODIFICACIONES A ESTOS TÉRMINOS
+9.1. NUVENTA puede modificar estos términos en cualquier momento para reflejar cambios normativos, técnicos u operativos.
+9.2. Las modificaciones sustanciales serán notificadas mediante aviso destacado en la plataforma al iniciar sesión, con un mínimo de 15 días corridos de anticipación a su entrada en vigencia.
+9.3. Las modificaciones menores o formales (correcciones de redacción, actualización de datos de contacto) entrarán en vigencia de forma inmediata.
+9.4. La continuación del uso tras la notificación y entrada en vigencia implica aceptación de los cambios. Si no acepta las modificaciones, debe notificar al Usuario Administrador para que revoque su acceso.
+
+10. ACEPTACIÓN Y CONSENTIMIENTO
+Al hacer clic en "Aceptar", marcar la casilla de verificación o acceder a la plataforma por primera vez, usted declara que:
+•	Ha leído y comprendido estos términos en su totalidad, incluyendo las obligaciones de confidencialidad y no competencia.
+•	Acepta cumplir con todas las obligaciones aquí establecidas.
+•	Consiente el tratamiento de sus datos personales conforme la Política de Privacidad de NUVENTA y esta sección 4.
+•	Acepta el monitoreo técnico limitado de su actividad en la plataforma conforme la sección 6.
+•	Acepta las obligaciones de confidencialidad sobre el sistema NUVENTA establecidas en la Sección 13.
+•	Acepta la cláusula de no competencia establecida en la Sección 14.
+•	Reconoce que el incumplimiento puede resultar en la revocación de su acceso y consecuencias laborales determinadas exclusivamente por su empleador.
+•	Comprende que este documento no modifica ni sustituye su contrato de trabajo o relación contractual con su empleador.
+NUVENTA conserva registro electrónico de su aceptación, incluyendo fecha, hora, dirección IP y versión del documento aceptada, conforme lo exige el artículo 5 de la Ley 25.326.
+
+11. PROPIEDAD INTELECTUAL DE NUVENTA
+11.1. La plataforma NUVENTA, incluyendo pero no limitándose a su código fuente, diseño, arquitectura, interfaz de usuario, lógica de negocio, algoritmos, base de datos, documentación técnica, manuales y cualquier material relacionado, constituye obra intelectual protegida por:
+•	Ley 11.723 de Propiedad Intelectual de la República Argentina.
+•	Código Civil y Comercial de la Nación (Libro Tercero, Título IV).
+•	Tratados internacionales ratificados por Argentina (Convenio de Berna, Acuerdo ADPIC/TRIPS).
+11.2. Todos los derechos de propiedad intelectual sobre NUVENTA pertenecen exclusiva e íntegramente a Lautaro Gelman. Su acceso como Usuario Autorizado constituye únicamente una licencia de uso limitada, personal, no exclusiva, no transferible y revocable.
+11.3. Usted reconoce que no adquiere ningún derecho de propiedad, participación ni licencia sobre el sistema NUVENTA más allá del uso autorizado para las funciones laborales específicas asignadas por su empleador.
+
+12. LEY APLICABLE Y JURISDICCIÓN
+12.1. Estos términos se rigen por la legislación argentina vigente, en particular:
+•	Ley 25.326 de Protección de Datos Personales y su Decreto Reglamentario 1558/2001.
+•	Ley 11.723 de Propiedad Intelectual.
+•	Código Civil y Comercial de la Nación (Ley 26.994).
+•	Ley 24.240 de Defensa del Consumidor.
+•	Normativa complementaria de la Agencia de Acceso a la Información Pública (AAIP).
+12.2. JURISDICCIÓN Y LEY APLICABLE
+Ley Aplicable:
+Este contrato se rige e interpreta exclusivamente conforme a la legislación de la República Argentina, en particular:
+•	Código Civil y Comercial de la Nación (Ley 26.994)
+•	Ley 25.326 de Protección de Datos Personales
+•	Ley 24.240 de Defensa del Consumidor
+•	Ley 11.723 de Propiedad Intelectual
+Jurisdicción Territorial:
+Para toda controversia, reclamo o disputa relacionada con este contrato, su interpretación, cumplimiento, incumplimiento, validez o nulidad, las partes se someten a la jurisdicción exclusiva de los TRIBUNALES CIVILES Y COMERCIALES DE LA PRIMERA CIRCUNSCRIPCIÓN JUDICIAL DE LA PROVINCIA DE MENDOZA, REPÚBLICA ARGENTINA, con asiento en la Ciudad de Mendoza (Capital), renunciando expresamente a cualquier otro fuero o jurisdicción que pudiera corresponderles.
+Protección del Consumidor - Opción de Fuero (Art. 36 Ley 24.240):
+Cuando el Usuario revista calidad de consumidor final conforme artículo 1° de la Ley 24.240 de Defensa del Consumidor:
+•	a) El consumidor PODRÁ OPTAR LIBREMENTE por demandar a NUVENTA en los tribunales de la Primera Circunscripción Judicial de Mendoza, o en los tribunales de su domicilio real (donde efectivamente reside).
+•	b) NUVENTA SOLO podrá demandar al consumidor ante los tribunales de Mendoza o los del domicilio del consumidor.
+•	c) Esta opción de fuero es irrenunciable e inmodificable (Art. 3 Ley 24.240).
+12.3. Sin perjuicio de lo anterior, usted conserva el derecho de presentar reclamos ante la Agencia de Acceso a la Información Pública (AAIP) en su carácter de autoridad de aplicación de la Ley 25.326.
+
+13. CONFIDENCIALIDAD SOBRE EL SISTEMA NUVENTA
+13.1. Además de la confidencialidad sobre la información de su empleador (Sección 5), usted asume obligaciones específicas de confidencialidad respecto del propio sistema NUVENTA.
+13.2. Información Confidencial del Sistema incluye (sin limitación):
+•	Arquitectura técnica, estructura de base de datos, esquemas, modelos de datos.
+•	Algoritmos, fórmulas de cálculo, lógica de negocio implementada.
+•	Código fuente, librerías, frameworks utilizados, dependencias técnicas.
+•	Metodologías de desarrollo, procesos internos, flujos de trabajo (workflows).
+•	Documentación técnica interna, manuales de usuario avanzados, especificaciones funcionales.
+•	Vulnerabilidades de seguridad, bugs conocidos, limitaciones técnicas.
+•	Roadmap de desarrollo, funcionalidades planificadas, estrategia de producto.
+•	Integraciones con sistemas de terceros, APIs, credenciales de conexión.
+•	Estadísticas de uso agregadas, métricas de rendimiento, patrones de comportamiento de usuarios.
+•	Cualquier información técnica, comercial o estratégica no accesible al público general.
+13.3. Usted se compromete expresamente a:
+•	NO divulgar, publicar, compartir ni comunicar a terceros ninguna información confidencial del sistema.
+•	NO realizar capturas de pantalla, grabaciones, documentación o esquemas de la arquitectura técnica con fines de replicación.
+•	NO discutir públicamente (redes sociales, foros, conferencias) aspectos técnicos internos de NUVENTA.
+•	NO utilizar información confidencial del sistema para desarrollar, asesorar o contribuir a sistemas competidores.
+•	NO realizar análisis comparativos técnicos (benchmarking) sin autorización expresa y por escrito de NUVENTA.
+•	Reportar inmediatamente a NUVENTA cualquier vulnerabilidad de seguridad descubierta, manteniéndola confidencial hasta su resolución.
+13.4. Esta obligación de confidencialidad permanece vigente durante todo el período de su acceso autorizado y por un plazo adicional de tres (3) años posteriores a su finalización.
+13.5. La obligación de confidencialidad NO aplica a información que:
+•	Sea o se convierta en dominio público sin culpa o acción del Usuario Autorizado.
+•	Deba divulgarse por orden judicial firme, requerimiento de autoridad competente o disposición legal imperativa (en cuyo caso debe notificar previamente a NUVENTA para que pueda ejercer sus derechos de defensa).
+•	Esté disponible públicamente en la documentación oficial de NUVENTA o en materiales de marketing autorizados.
+13.6. El incumplimiento de esta obligación de confidencialidad puede resultar en:
+•	Revocación inmediata de su acceso a la plataforma.
+•	Acciones legales por parte de NUVENTA para proteger sus derechos de propiedad intelectual.
+•	Reclamación de daños y perjuicios conforme la legislación argentina vigente.
+•	Notificación a su empleador del incumplimiento, con las consecuencias laborales que este determine.
+
+14. PROTECCIÓN DE PROPIEDAD INTELECTUAL Y RESTRICCIÓN DE USO
+Esta sección complementa la cláusula de confidencialidad estableciendo restricciones específicas sobre el uso de la información confidencial de NUVENTA con fines competitivos.
+14.1. Compromiso de No Uso de Información Confidencial con Fines Competitivos
+Durante su acceso autorizado a NUVENTA y por un plazo de dos (2) años posteriores a la finalización del mismo, usted se compromete expresamente a NO utilizar la información confidencial del sistema (según definida en la Sección 13.2) para:
+•	Desarrollar, diseñar, programar o participar en el desarrollo de sistemas, plataformas o aplicaciones que incorporen, repliquen o se basen en la arquitectura técnica, algoritmos, metodologías o funcionalidades específicas de NUVENTA.
+•	Asesorar, consultar o colaborar con terceros en el diseño o desarrollo de productos que utilicen conocimientos específicos adquiridos sobre la estructura interna, lógica de negocio o implementación técnica de NUVENTA.
+•	Crear productos o servicios que reproduzcan el modelo de arquitectura de datos, flujos de trabajo, integraciones de sistemas o diseño de experiencia de usuario específicos de NUVENTA.
+•	Compartir, transferir o poner a disposición de terceros (incluyendo empleadores futuros, emprendimientos propios o empresas competidoras) documentación, esquemas, diagramas técnicos o cualquier material que refleje el funcionamiento interno de NUVENTA.
+•	Participar activamente en proyectos que busquen expresamente replicar o imitar las soluciones técnicas, procesos propietarios o innovaciones específicas de NUVENTA reveladas durante su acceso autorizado.
+14.2. Alcance y Límites de la Restricción
+Esta restricción se centra específicamente en el uso indebido de información confidencial propietaria de NUVENTA. NO constituye una prohibición general de trabajo en la industria tecnológica ni una restricción amplia sobre su libertad laboral.
+Esta cláusula NO le impide:
+•	Trabajar en desarrollo de software en general, incluso en el sector de sistemas de gestión empresarial, siempre que no utilice información confidencial de NUVENTA.
+•	Desarrollar sistemas utilizando conocimientos generales de la industria, frameworks públicos, tecnologías de código abierto, patrones de diseño comunes y mejores prácticas disponibles públicamente.
+•	Aplicar habilidades técnicas generales adquiridas durante su experiencia profesional (lenguajes de programación, arquitecturas estándar, metodologías ágiles, principios de diseño).
+•	Trabajar en sistemas verticales para industrias específicas (salud, educación, logística) que no repliquen el enfoque, arquitectura o soluciones propietarias de NUVENTA.
+•	Desarrollar herramientas genéricas, componentes reutilizables o utilidades que no incorporen información confidencial específica de NUVENTA.
+•	Trabajar para empresas que ofrezcan productos diversos, siempre que su participación no involucre el uso de información confidencial de NUVENTA en productos competidores.
+En resumen: puede trabajar libremente en tecnología y desarrollo de software. Lo que no puede hacer es usar los secretos comerciales, arquitectura propietaria, metodologías específicas o conocimientos técnicos internos de NUVENTA para construir o contribuir a productos que compitan directamente con NUVENTA.
+14.3. Definición de Uso Prohibido de Información Confidencial
+Para los efectos de esta sección, se considera que existe uso prohibido de información confidencial cuando:
+•	El sistema, producto o servicio desarrollado incorpora o replica elementos sustanciales de la arquitectura técnica, diseño de base de datos, lógica de negocio, algoritmos propietarios o flujos de trabajo específicos de NUVENTA.
+•	Existe evidencia razonable de que el desarrollo se benefició directamente de información confidencial a la que usted tuvo acceso durante su uso de NUVENTA, más allá de conocimientos generales de la industria.
+•	Se utilizan metodologías de implementación, esquemas de integración o soluciones técnicas específicas que constituyen innovaciones propietarias de NUVENTA y no están disponibles públicamente.
+•	El producto resultante presenta similitudes técnicas o funcionales sustanciales con NUVENTA que no pueden explicarse razonablemente por el uso de conocimientos públicos o prácticas estándar de la industria.
+14.4. Razonabilidad y Proporcionalidad
+Esta cláusula ha sido diseñada conforme los principios de razonabilidad establecidos en el derecho argentino:
+•	Plazo limitado: Dos (2) años posteriores al cese de acceso, plazo razonable para proteger el valor comercial de la información sin impedir indefinidamente el desarrollo profesional.
+•	Alcance específico: Limitada al uso de información confidencial específica de NUVENTA, no a toda actividad de desarrollo de software.
+•	Protección legítima: Resguarda la inversión de NUVENTA en desarrollo tecnológico, investigación y metodologías propietarias.
+•	Sin restricción territorial: Aplicable donde se use información confidencial de NUVENTA, dado que la propiedad intelectual es globalmente protegible.
+14.5. DEBER DE CONSULTA PREVIA (Buena Fe Contractual)
+Si tras finalizar su acceso autorizado surge una oportunidad laboral sobre la cual tenga dudas razonables respecto de si involucra uso prohibido de información confidencial de NUVENTA, el ex Usuario Autorizado podrá:
+•	1. Consultar por escrito a nuventaargentina@gmail.com describiendo en términos GENERALES la naturaleza del proyecto propuesto (sin revelar información confidencial de terceros ni datos específicos del potencial empleador).
+•	2. NUVENTA responderá dentro de 10 días hábiles indicando si considera que existe o no conflicto con las obligaciones de confidencialidad/no competencia.
+•	3. La falta de respuesta dentro del plazo se considera AUSENCIA DE OBJECIÓN.
+•	4. Si NUVENTA objeta, deberá fundamentar razonablemente cuál sería la violación específica, permitiendo al consultante ajustar el proyecto o desistir.
+Finalidad de esta cláusula:
+Este mecanismo busca evitar controversias innecesarias, fomentar la buena fe contractual, y balancear la protección legítima de NUVENTA con el derecho al trabajo del ex Usuario Autorizado.
+Carácter opcional:
+El uso de este mecanismo es voluntario. Su no utilización no constituye por sí misma evidencia de mala fe ni renuncia a defensas legales.
+14.6. Consecuencias del Incumplimiento
+El uso comprobado de información confidencial de NUVENTA en violación de esta cláusula podrá resultar en:
+•	Acción judicial por violación de obligaciones de confidencialidad y protección de propiedad intelectual ante los Tribunales de Mendoza.
+•	Reclamación de daños y perjuicios conforme el Código Civil y Comercial (lucro cesante, daño emergente, daño moral si correspondiere).
+•	Medidas cautelares para impedir el uso continuado de información confidencial durante el proceso judicial.
+•	Notificación a su empleador actual o futuro del incumplimiento, según corresponda.
+14.7. Divisibilidad de la Cláusula
+Si cualquier tribunal declarara alguna parte de esta cláusula como excesiva, nula o inaplicable, las partes acuerdan que:
+•	El resto de la cláusula mantendrá plena vigencia y efectividad.
+•	La parte declarada excesiva será reducida al máximo permitido por ley (por ejemplo, si el plazo se considerara excesivo, se reducirá al tiempo que el tribunal considere razonable).
+•	Esta voluntad de ajuste busca preservar la protección legítima de la propiedad intelectual de NUVENTA dentro de los límites legales.
+
+15. CONTACTO Y CONSULTAS
+Para consultas sobre estos términos, ejercicio de derechos ARCO, consultas sobre confidencialidad o restricciones de uso, o asuntos relacionados con su acceso a la plataforma:
+
+Responsable del Tratamiento: Lautaro Gelman
+Email: nuventaargentina@gmail.com
+Asunto sugerido para derechos ARCO: "[ARCO - Usuario Autorizado] - [Su consulta]"
+Asunto sugerido para confidencialidad/uso de información: "[CONFIDENCIALIDAD] - [Su consulta]"
+Asunto sugerido para otras consultas: "[USUARIO AUTORIZADO] - [Su consulta]"
+Sitio web: www.nuventa.com.ar
+Horario de atención: Lunes a viernes, 9:00 a 18:00 hs (UTC-3)
+
+NUVENTA acusará recibo de toda consulta dentro de las 48 horas hábiles y responderá solicitudes de ejercicio de derechos ARCO dentro de los 10 días hábiles conforme lo establece la Ley 25.326.
+
+──────────────────────────────────────────────────────────────────────
+
+NUVENTA - Términos de Uso para Usuarios Autorizados
+Versión 1.0 | Vigente desde: 17/02/2026
+
+Ley 25.326 (Protección de Datos) | Ley 11.723 (Propiedad Intelectual) | Código Civil y Comercial
+
+Documento diseñado para protección equilibrada de derechos de todas las partes

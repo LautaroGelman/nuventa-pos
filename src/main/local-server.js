@@ -742,6 +742,7 @@ handlers['POST /api/auth/login'] = async (req, res, body) => {
   // 4. User NOT in SQLite + offline → error (must connect at least once)
   try {
     const result = await authService.login(loginEmail, password, {
+      legalNotice: { employeeTermsVersion: body.employeeTermsVersion, employeeTermsHash: body.employeeTermsHash },
       onStatus: (status) => loginEvents.emit('login-status', status),
     });
 
@@ -784,6 +785,7 @@ handlers['POST /api/auth/verify-device'] = async (req, res, body, route, query) 
   }
 
   const result = await authService.verifyDevice(email, code, query.forceLogout === 'true', {
+    legalNotice: { employeeTermsVersion: body.employeeTermsVersion, employeeTermsHash: body.employeeTermsHash },
     onStatus: (status) => loginEvents.emit('login-status', status),
   });
   if (!result.success) {
@@ -1330,11 +1332,14 @@ handlers['POST /sales'] = async (req, res, body) => {
   db.run('UPDATE sales SET local_request_hash=?,product_pricing_version=1 WHERE local_id=?', [requestHash, localId]);
 
   for (const item of resolvedItems) {
+    const stock = item.productId == null ? null : db.get('SELECT quantity,stock_tracked,weighable FROM products WHERE id=?', [item.productId]);
+    const stockBefore = stock?.stock_tracked && !stock.weighable ? Number(stock.quantity) : null;
+    if (stockBefore != null && (!Number.isSafeInteger(stockBefore - item.quantity) || stockBefore - item.quantity < -2147483648)) throw Object.assign(new Error('El stock excede el rango permitido'), { status: 400 });
     db.run(`
       INSERT INTO sale_items (sale_local_id, product_id, product_name, product_code, quantity,
         unit_price, client_unit_price, catalog_revision, price_proof, wholesale_minimum_quantity,
-        client_product_uuid, unit_cost_at_sale, cost_pending, receipt_price_uuid)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        client_product_uuid, unit_cost_at_sale, cost_pending, receipt_price_uuid, stock_before)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       localId, item.productId,
       item.productName,
@@ -1342,7 +1347,7 @@ handlers['POST /sales'] = async (req, res, body) => {
       item.quantity, item.unitPrice, item.clientUnitPrice,
       item.catalogRevision, item.priceProof, item.wholesaleMinimumQuantity,
       item.clientProductUuid, item.unitCostAtSale, item.costPending ? 1 : 0,
-      item.receiptPriceUuid,
+      item.receiptPriceUuid, stockBefore,
     ]);
 
     // Decrement local stock. Los PESABLES quedan afuera igual que los no_code: se venden por kilo
@@ -1457,6 +1462,7 @@ function localSaleToDto(db, sale) {
   const payments = db.all('SELECT * FROM sale_payments WHERE sale_local_id = ? ORDER BY id ASC', [sale.local_id]);
   return {
     id: sale.cloud_id || sale.local_id,
+    stockWarnings: require('./sale-stock').warnings(items),
     saleDate: sale.sale_date,
     fecha: sale.sale_date,
     totalAmount: sale.total_amount,
@@ -2973,7 +2979,8 @@ function startLocalServer() {
         const getPath = decodeURIComponent(req.url.split('?')[0]);
         const isAuthGet = getPath === '/api/auth/me'
           || getPath === '/api/auth/session-status'
-          || getPath.startsWith('/api/auth/');
+          || getPath.startsWith('/api/auth/')
+          || require('./legal-publication-routes').isPublicLegalPath(getPath);
         if (!isAuthGet) {
           try {
             if (blockIfNoSessionToken(getDb(), res)) return;
@@ -3083,6 +3090,12 @@ function startLocalServer() {
         }
 
         // ── Role-based routing ────────────────────────────
+        // Legal evidence is authoritative in the cloud; every commerce role can read/close its own notice.
+        const legalNoticeRoute = ['/api/client-panel/legal-notices', '/api/subscription/retention-notices'].includes(pathname) && req.method === 'GET'
+          || /^\/api\/client-panel\/legal-notices\/[a-f0-9]{64}\/dismiss$/.test(pathname) && req.method === 'POST';
+        const legalPublicRoute = req.method === 'GET' && require('./legal-publication-routes').isPublicLegalPath(pathname);
+        if (legalPublicRoute) return await require('./legal-publication-routes').proxyPublicLegal(req, res, apiClient.baseUrl);
+        if (legalNoticeRoute) return await proxyToCloud(req, res, req.method, req.url, body);
         if (receiptRoute) {
           const receiptDb = getDb();
           const scope = { clientId: Number(route.clientId), branchId: Number(route.sucursalId), employeeId: Number(getConfigVal(receiptDb, 'employee_id')), canPrice: isAdminOrOwner() };
@@ -3094,6 +3107,21 @@ function startLocalServer() {
         // Cajero/Inventario → 403 blocked
         // Tutorial progress is online-only user metadata, including for cashiers.
         // It must never enter the business outbox.
+        if (subpath === '/ui-preferences' && ['GET', 'PATCH'].includes(req.method)) {
+          const db = getDb(); const clientId = Number(route.clientId);
+          if (clientId !== Number(getConfigVal(db, 'client_id'))) return jsonResponse(res, 403, { error: 'Negocio no autorizado.' });
+          if (req.method === 'PATCH' && !getUserRoles().some(role => ['ROLE_PROPIETARIO', 'PROPIETARIO'].includes(role)))
+            return jsonResponse(res, 403, { error: 'Solo el propietario puede cambiar las preferencias.' });
+          if (req.method === 'PATCH' && blockIfSessionRevoked(db, res)) return;
+          const preferences = require('./business-ui-preferences');
+          try {
+            const result = await preferences.syncPreferences(db, apiClient, clientId, req.method === 'PATCH' ? body : undefined);
+            return jsonResponse(res, 200, result);
+          } catch (err) {
+            if (req.method === 'PATCH' || [401,403,409].includes(err.status)) return jsonResponse(res, err.status || 503, { error: err.message });
+            return jsonResponse(res, 200, preferences.getPreferences(db, clientId));
+          }
+        }
         if (subpath === '/product-form-preferences' && ['GET', 'PATCH'].includes(req.method)) {
           const db = getDb();
           if (Number(route.clientId) !== Number(getConfigVal(db, 'client_id')) || Number(route.sucursalId) !== Number(getConfigVal(db, 'sucursal_id')))

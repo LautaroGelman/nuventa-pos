@@ -21,6 +21,6 @@ function propose(previous, cost) {
   const markup = previous?.pricingMode === 'MARKUP' ? previous.targetMarkupPercent
     : previous?.cost > 0 ? Math.round(((previous.price / previous.cost - 1) * 100 + Number.EPSILON) * 100) / 100 : null;
   if (!(cost > 0) || !previous || previous.costPending || !(previous.cost > 0) || markup == null || markup < 0 || markup > 10000) return null;
-  return roundedMarkupPrice(cost, markup);
+  return cost === previous.cost ? previous.price : roundedMarkupPrice(cost, markup);
 }
 module.exports = { roundedMarkupPrice, unitCost, snapshot, propose };

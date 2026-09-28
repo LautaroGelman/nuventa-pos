@@ -42,20 +42,24 @@ app.whenReady().then(async () => {
     assert.ok(path.basename(app.getPath('userData')).startsWith('nuventa-purchases-test-'));
     db.transaction(() => {
       db.run("INSERT INTO products(id,client_id,sucursal_id,code,name,cost,price,quantity,stock_tracked,active) VALUES(899,1,1,'LEGACY','Producto anterior',5,10,7,1,1)");
+      db.run('DROP TRIGGER product_pricing_revision');
+      db.run('DROP TABLE purchase_receipt_correction_deltas');
+      db.run('ALTER TABLE products DROP COLUMN pricing_revision');
+      db.run('ALTER TABLE sale_items DROP COLUMN stock_before');
       for (const table of ['purchase_receipt_lines', 'purchase_receipt_amendments', 'purchase_receipts', 'product_client_references']) db.run(`DROP TABLE ${table}`);
       db.run('DROP INDEX idx_product_client_uuid');
       for (const [table, columns] of Object.entries({ products: ['client_product_uuid','cost_pending','pricing_mode','target_markup_percent','pending_price_receipt_uuid'],
         sale_items: ['client_product_uuid','unit_cost_at_sale','cost_pending','receipt_price_uuid'], return_items: ['client_product_uuid'] }))
         for (const column of columns) db.run(`ALTER TABLE ${table} DROP COLUMN ${column}`);
-      db.run('DELETE FROM schema_migrations WHERE version IN (15,16)');
+      db.run('DELETE FROM schema_migrations WHERE version IN (15,16,17)');
     });
     database.closeDatabase(); await database.initDatabase(); db = database.getDb();
     assert.deepEqual(db.get('SELECT price,cost,quantity,cost_pending,client_product_uuid FROM products WHERE id=899'),
       { price: 10, cost: 5, quantity: 7, cost_pending: 0, client_product_uuid: null });
     assert.equal(db.get('SELECT COUNT(*) n FROM cash_sessions').n, 1);
-    assert.equal(db.get('SELECT MAX(version) n FROM schema_migrations').n, 16);
+    assert.equal(db.get('SELECT MAX(version) n FROM schema_migrations').n, 17);
     db.run('DELETE FROM products WHERE id=899');
-    console.log('[PURCHASES] Migración SQLite 14 → 16 con catálogo y caja existentes: OK');
+    console.log('[PURCHASES] Migración SQLite 14 → 17 con catálogo y caja existentes: OK');
     const line = newLine('Bebida nueva'); const input = request(line);
     receipts.saveDraft(db, scope, input.uuid, input);
     database.closeDatabase(); await database.initDatabase(); db = database.getDb();
@@ -203,5 +207,7 @@ app.whenReady().then(async () => {
     assert.equal(db.get('SELECT quantity FROM products WHERE id=?', [next.lines[0].productId]).quantity, 15);
     assert.equal(db.get('SELECT stock_tracked FROM products WHERE id=?', [next.lines[0].productId]).stock_tracked, 1);
     console.log('[PURCHASES] Persistencia, reintento, stock 15-3=12, referencias, importes y producto sin código: OK');
+    await require('./purchase-receipts-review-regressions')(database);
+    await require('./purchase-receipt-corrections-regressions')(database, post);
   } finally { await stopLocalServer(); database.closeDatabase(); app.quit(); }
 }).catch(error => { console.error(error.stack); app.exit(1); });

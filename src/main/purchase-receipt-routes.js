@@ -6,8 +6,9 @@ function cacheRemote(db, scope, receipt) {
   if (!receipt || Number(receipt.clientId) !== scope.clientId || Number(receipt.sucursalId) !== scope.branchId) throw receipts.error(403, 'Ingreso de otra sucursal');
   const row = db.get('SELECT * FROM purchase_receipts WHERE uuid=? AND client_id=? AND sucursal_id=?', [receipt.uuid, scope.clientId, scope.branchId]);
   if (row && (row.sync_status !== 'synced' || db.get("SELECT 1 FROM purchase_receipt_amendments WHERE receipt_local_id=? AND sync_status<>'synced' LIMIT 1", [row.local_id]))) return;
+  if (row && Number(receipt.version) < Number(row.remote_version)) return;
   db.transaction(() => {
-    if (row) db.run('UPDATE purchase_receipts SET receipt_json=?,remote_version=?,draft_json=? WHERE local_id=?', [JSON.stringify(receipt), receipt.version, receipt.draft ? JSON.stringify(receipt.draft) : null, row.local_id]);
+    if (row) db.run('UPDATE purchase_receipts SET state=?,receipt_json=?,remote_version=?,draft_json=? WHERE local_id=?', [receipt.state, JSON.stringify(receipt), receipt.version, receipt.draft ? JSON.stringify(receipt.draft) : null, row.local_id]);
     else db.run(`INSERT INTO purchase_receipts(uuid,client_id,sucursal_id,employee_id,state,receipt_json,draft_json,sync_status,remote_version,created_at)
       VALUES (?,?,?,?,?,?,?,'synced',?,?)`, [receipt.uuid, scope.clientId, scope.branchId, receipt.employeeId, receipt.state, JSON.stringify(receipt), receipt.draft ? JSON.stringify(receipt.draft) : null, receipt.version, receipt.createdAt]);
   });
@@ -33,19 +34,27 @@ async function handle(context) {
       checkIdentity(); return jsonResponse(res, 200, { enabled: false, contractVersion: 1, ...receipts.capabilities(db, scope) });
     }
     if (subpath === '/purchase-receipts' && req.method === 'GET') {
+      const filter = query.filter || 'ALL';
+      if (!['ALL', 'DRAFT', 'AMOUNT_PENDING'].includes(filter)) throw receipts.error(400, 'Filtro inválido');
       try {
-        const first = await cloud('?page=0&size=100'); for (const receipt of first.content || []) cacheRemote(db, scope, receipt);
+        const first = await cloud(`?page=0&size=100&filter=${filter}`); for (const receipt of first.content || []) cacheRemote(db, scope, receipt);
+        const remoteIds = (first.content || []).map(receipt => receipt.uuid);
         // Cache the requested older page too; local pending rows remain visible at the top.
         const wanted = Math.max(0, Math.floor(((Number(query.page) || 0) * 30 + 29) / 100));
         if (wanted > 0) for (let page = 1; page <= Math.min(wanted + 1, Number(first.totalPages) - 1); page++) {
-          const result = await cloud(`?page=${page}&size=100`); for (const receipt of result.content || []) cacheRemote(db, scope, receipt);
+          const result = await cloud(`?page=${page}&size=100&filter=${filter}`); for (const receipt of result.content || []) cacheRemote(db, scope, receipt);
+          remoteIds.push(...(result.content || []).map(receipt => receipt.uuid));
         }
-        const local = receipts.list(db, scope, query.page);
+        const local = receipts.list(db, scope, query.page, 30, filter, filter === 'ALL' ? undefined : remoteIds);
         local.totalPages = Math.max(local.totalPages, Math.ceil(Number(first.totalElements || 0) / 30));
         checkIdentity(); return jsonResponse(res, 200, local);
       }
-      catch (err) { if (err.status === 401 || err.status === 403) throw err; }
-      checkIdentity(); return jsonResponse(res, 200, receipts.list(db, scope, query.page));
+      catch (err) {
+        // A real HTTP failure is not an empty history. Offline/network failures
+        // may use the local history; server errors must expose retry in the UI.
+        if (err.status && ![0, 503].includes(err.status)) throw err;
+      }
+      checkIdentity(); return jsonResponse(res, 200, receipts.list(db, scope, query.page, 30, filter));
     }
     if (subpath === '/purchase-receipts/confirm' && req.method === 'POST') {
       const prior = db.get('SELECT state FROM purchase_receipts WHERE uuid=? AND client_id=? AND sucursal_id=?', [body.uuid, scope.clientId, scope.branchId]);
@@ -69,11 +78,18 @@ async function handle(context) {
         throw error;
       }
     }
+    const correctionMatch = subpath.match(/^\/purchase-receipts\/([0-9a-f-]+)\/lines\/([0-9a-f-]+)\/corrections(\/preview)?$/);
+    if (correctionMatch && req.method === 'POST') {
+      const corrections = require('./purchase-receipt-corrections');
+      const result = correctionMatch[3] ? corrections.preview(db, scope, correctionMatch[1], correctionMatch[2], body)
+        : corrections.correct(db, scope, correctionMatch[1], correctionMatch[2], body);
+      return jsonResponse(res, 200, result);
+    }
     const conflictMatch = subpath.match(/^\/purchase-receipts\/([0-9a-f-]+)\/(conflict|resolve-product|sync-review)$/);
     if (conflictMatch) {
       const receipt = receipts.get(db, scope, conflictMatch[1]);
       const original = db.get(`SELECT o.* FROM sync_outbox o WHERE o.client_id=? AND o.sucursal_id=?
-        AND (o.idempotency_key=? AND o.mutation_type='PURCHASE_RECEIPT' OR o.mutation_type='PURCHASE_RECEIPT_AMOUNTS'
+        AND (o.idempotency_key=? AND o.mutation_type='PURCHASE_RECEIPT' OR o.mutation_type IN ('PURCHASE_RECEIPT_AMOUNTS','PURCHASE_RECEIPT_CORRECTION')
           AND o.source_id IN (SELECT a.local_id FROM purchase_receipt_amendments a JOIN purchase_receipts r ON r.local_id=a.receipt_local_id WHERE r.uuid=? AND r.client_id=? AND r.sucursal_id=?))
         ORDER BY o.sequence LIMIT 1`, [scope.clientId, scope.branchId, receipt.uuid, receipt.uuid, scope.clientId, scope.branchId]);
       if (!original) throw receipts.error(409, 'El mensaje original no está pendiente de sincronizar');
@@ -85,7 +101,7 @@ async function handle(context) {
         if (original.state !== 'QUARANTINED') throw receipts.error(409, 'La operación no está en revisión');
         const device = db.get('SELECT device_id FROM sync_state WHERE client_id=? AND sucursal_id=?', [scope.clientId, scope.branchId]);
         const request = { payload, payloadHash: original.payload_hash, deviceId: device?.device_id,
-          expectedVersion: body?.expectedVersion ?? null, products: body?.products ?? null };
+          expectedVersion: body?.expectedVersion ?? null, products: body?.products ?? null, correctionPreviewHash: body?.correction?.previewHash ?? null };
         const result = await cloud(req.method === 'GET' ? '/sync-review/preview' : '/sync-review', 'POST', request);
         if (req.method === 'POST') db.transaction(() => {
           db.run("UPDATE sync_outbox SET state='PENDING',last_error=NULL,warning_code=NULL,next_retry_at=NULL WHERE sequence=?", [original.sequence]);
@@ -110,6 +126,14 @@ async function handle(context) {
       }
       throw receipts.error(405, 'Método no permitido');
     }
+    // Evidence is authoritative in the cloud. Never queue or infer an offline acceptance.
+    if (subpath === '/purchase-receipts/ai-notice') {
+      if (!['GET', 'POST'].includes(req.method)) throw receipts.error(405, 'Método no permitido');
+      if (!online()) throw receipts.error(503, 'Conectate para usar la lectura asistida. Podés cargar los productos manualmente.');
+      return await proxyToCloud(req, res, req.method, req.url, body);
+    }
+    if (req.method === 'POST' && /\/documents\/[^/]+\/files$/.test(subpath) && !online())
+      throw receipts.error(503, 'Conectate para enviar la factura. Podés ingresar los productos manualmente.');
     if (subpath === '/purchase-receipts/matches' || subpath.startsWith('/purchase-receipts/documents/'))
       return await proxyToCloud(req, res, req.method, req.url, body);
     const match = subpath.match(/^\/purchase-receipts\/([0-9a-f-]+)(?:\/(draft|amounts|document))?$/);

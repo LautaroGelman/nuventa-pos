@@ -1,0 +1,398 @@
+NUVENTA
+POLÍTICA DE PRIVACIDAD
+Y PROTECCIÓN DE DATOS PERSONALES
+
+
+Versión: 1.2   |   Fecha de vigencia: 14/08/2026   |   Última modificación: 14/08/2026
+Ley 25.326 de Protección de Datos Personales — República Argentina
+AVISO IMPORTANTE ANTES DE CONTINUAR
+Esta Política de Privacidad describe cómo NUVENTA recopila, utiliza, almacena y protege sus datos personales. Al registrarse, acceder o utilizar el Servicio mediante marcación de casilla de verificación o click en botón de aceptación, usted declara haber leído, comprendido y aceptado íntegramente las prácticas aquí descriptas. Si no está de acuerdo, debe abstenerse de utilizar el Servicio. Esta Política es complementaria e integra los Términos y Condiciones de Uso de NUVENTA.
+
+1. IDENTIFICACIÓN DEL RESPONSABLE DEL TRATAMIENTO
+Conforme el artículo 2° de la Ley 25.326 de Protección de Datos Personales, el Responsable del Tratamiento es:
+Nombre: Lautaro Gelman
+CUIT/CUIL: 20-45143098-0
+Domicilio legal: Virgen de Cuyo 2645, Maipú, Luzuriaga (CP 5513), Provincia de Mendoza, República Argentina
+Email de contacto para privacidad: nuventaargentina@gmail.com
+Sitio web: www.nuventa.com.ar
+
+El Responsable del Tratamiento es la persona que decide sobre la finalidad, contenido y uso del tratamiento de datos personales recolectados a través de la plataforma NUVENTA, en adelante indistintamente "NUVENTA", el "Proveedor" o el "Responsable".
+2. MARCO LEGAL APLICABLE
+La presente Política de Privacidad se rige por la siguiente normativa argentina vigente:
+•	Ley 25.326 de Protección de Datos Personales y su Decreto Reglamentario 1558/2001.
+•	Disposiciones de la Agencia de Acceso a la Información Pública (AAIP) como autoridad de aplicación.
+•	Código Civil y Comercial de la Nación (Ley 26.994).
+•	Ley 24.240 de Defensa del Consumidor y modificatorias.
+•	Resolución AAIP 47/2018 — Medidas de Seguridad para el Tratamiento de Datos Personales.
+•	Normativa complementaria dictada por la AAIP y sus organismos predecesores.
+
+🌐 Compatibilidad con el RGPD/GDPR: En la medida en que resulte aplicable por la residencia de los titulares, NUVENTA implementa prácticas consistentes con el Reglamento General de Protección de Datos de la Unión Europea (RGPD/GDPR). A tal efecto: (i) las bases legales de cada tratamiento están identificadas explícitamente en la Sección 6; (ii) se realizan evaluaciones periódicas de riesgo para el tratamiento; (iii) se han adoptado cláusulas contractuales tipo (Standard Contractual Clauses) con los subprocesadores internacionales que las soportan. NUVENTA no designa un Delegado de Protección de Datos (DPO) al no alcanzar los umbrales que hacen obligatoria dicha designación bajo el RGPD, aunque el Responsable cumple personalmente con dichas funciones.
+3. ÁMBITO DE APLICACIÓN
+Esta Política de Privacidad aplica a:
+•	Toda persona humana o jurídica que acceda, se registre o utilice el servicio NUVENTA bajo cualquier modalidad vigente (Período de Prueba o planes de pago).
+•	Los Usuarios Autorizados (empleados, colaboradores) habilitados por el Usuario Administrador.
+•	Toda información personal recolectada a través de: (i) el sitio web www.nuventa.com.ar; (ii) la plataforma SaaS NUVENTA; (iii) comunicaciones por email u otros canales oficiales.
+
+No aplica a:
+•	Datos personales que el Usuario cargue sobre sus propios clientes, proveedores o empleados en la plataforma. Respecto de esos datos, el Usuario actúa como Responsable del Tratamiento, siendo NUVENTA Encargado de Tratamiento (ver Sección 5).
+4. DATOS PERSONALES QUE NUVENTA RECOPILA
+4.1. Datos Proporcionados Directamente por el Usuario
+Durante el proceso de registro y uso del Servicio, NUVENTA recopila los siguientes datos:
+
+a) Datos de Identificación y Contacto
+•	Nombre y apellido completo (personas humanas) o denominación social (personas jurídicas).
+•	Dirección de correo electrónico.
+•	Número de teléfono de contacto.
+•	País y provincia de residencia o domicilio.
+•	Rubro o actividad comercial.
+
+b) Datos Fiscales y Comerciales
+•	CUIT / CUIL / CDI.
+•	Condición ante AFIP (Responsable Inscripto, Monotributista, Consumidor Final, Exento).
+•	Domicilio fiscal declarado.
+•	Número y datos de la factura o recibo emitidos.
+
+c) Datos de Pago y Facturación
+•	Datos del medio de pago registrado en MercadoPago u otros procesadores habilitados (NUVENTA no almacena números de tarjeta, CVV ni datos sensibles de pago directamente; estos son gestionados por el procesador de pagos).
+•	Historial de pagos y renovaciones.
+•	Montos abonados por período.
+
+d) Datos de Seguridad y Autenticación
+•	Dirección de correo electrónico utilizada como nombre de usuario.
+•	Hash criptográfico de contraseña (nunca se almacena la contraseña en texto plano).
+•	Datos de sesión y tokens de autenticación.
+
+4.2. Datos Recopilados Automáticamente
+Con motivo del acceso y uso del Servicio, NUVENTA registra automáticamente:
+•	Dirección IP desde la cual se accede.
+•	Tipo y versión de navegador web utilizado.
+•	Sistema operativo del dispositivo.
+•	Fecha y hora exacta de acceso (timestamps).
+•	Páginas o secciones visitadas dentro de la plataforma.
+•	Acciones realizadas en el sistema (logs de auditoría).
+•	Versión de los Términos y Condiciones aceptada.
+
+Estos datos se recopilan con fines de seguridad, auditoría, prevención de fraude y mejora del Servicio. Su recolección es inherente al funcionamiento técnico de cualquier aplicación web.
+
+4.3. Datos NO Recopilados
+NUVENTA NO recopila ni trata las siguientes categorías de datos:
+•	Datos sensibles conforme Artículo 2° Ley 25.326: origen racial o étnico, opiniones políticas, convicciones religiosas o filosóficas, membresía sindical, datos relativos a la salud o a la vida sexual.
+•	Número y datos de tarjeta de crédito/débito directamente (delegado en procesadores PCI-DSS compliant como MercadoPago).
+•	Información de geolocalización en tiempo real.
+•	Contenido de comunicaciones privadas no relacionadas con el Servicio.
+5. ROLES EN EL TRATAMIENTO: RESPONSABLE Y ENCARGADO
+5.1. NUVENTA como Responsable del Tratamiento
+Respecto de los datos personales de los Usuarios (personas que contratan el Servicio), NUVENTA actúa como Responsable del Tratamiento, tomando decisiones sobre la finalidad, contenido y uso del tratamiento.
+
+5.2. NUVENTA como Encargado del Tratamiento
+Respecto de los datos personales de terceros que el Usuario ingrese en la plataforma (clientes, proveedores, empleados de su negocio), NUVENTA actúa como Encargado del Tratamiento, procesando dichos datos únicamente conforme las instrucciones del Usuario y para la prestación del Servicio contratado.
+
+En este rol, NUVENTA:
+•	No tratará esos datos para fines distintos a los instruidos por el Usuario.
+•	Implementará medidas de seguridad adecuadas conforme Sección 11.
+•	No cederá esos datos a terceros salvo obligación legal expresa.
+•	Destruirá o devolverá esos datos al término del contrato conforme Sección 9.
+
+El Usuario, en calidad de Responsable del Tratamiento de esos datos de terceros, es exclusivamente responsable de:
+•	Haber obtenido el consentimiento informado de los titulares (Art. 5 Ley 25.326).
+•	Haber cumplido con el deber de información hacia los titulares (Art. 6 Ley 25.326).
+•	Garantizar la licitud, legitimidad y proporcionalidad del tratamiento.
+•	Responder ante los titulares de datos y ante la AAIP por cualquier incumplimiento.
+•	Registrar las bases de datos ante la AAIP si correspondiere.
+6. FINALIDADES DEL TRATAMIENTO Y BASE LEGAL
+NUVENTA trata los datos personales de los Usuarios exclusivamente para las siguientes finalidades:
+
+6.1. Prestación del Servicio Contratado
+Finalidad: Crear y gestionar la cuenta del Usuario, habilitar el acceso a la plataforma y prestar todas las funcionalidades del Servicio.
+Base legal: Ejecución del contrato (Art. 5, inc. c, Ley 25.326).
+
+6.2. Facturación y Gestión de Pagos
+Finalidad: Emitir facturas y comprobantes fiscales, procesar cobros y renovaciones automáticas, gestionar reembolsos y mantener historial de pagos.
+Base legal: Obligación legal (normativa tributaria AFIP) y ejecución del contrato.
+
+6.3. Soporte Técnico y Atención al Cliente
+Finalidad: Identificar al Usuario que solicita asistencia, resolver consultas y registrar incidentes.
+Base legal: Ejecución del contrato e interés legítimo del Responsable.
+
+6.4. Seguridad y Prevención del Fraude
+Finalidad: Detectar accesos no autorizados, prevenir fraude, verificar identidad y conservar logs de auditoría.
+Base legal: Interés legítimo del Responsable y obligaciones de seguridad (Art. 9 Ley 25.326).
+
+6.5. Cumplimiento de Obligaciones Legales
+Finalidad: Cumplir con requerimientos de AFIP, AAIP, UIF, poder judicial, fiscalías y demás autoridades competentes.
+Base legal: Obligación legal imperativa.
+
+6.6. Comunicaciones Operativas
+Finalidad: Enviar notificaciones sobre el Servicio (cambios de precio, mantenimientos, vencimiento de suscripción, modificaciones a Términos y Política).
+Base legal: Ejecución del contrato e interés legítimo. Estas comunicaciones son esenciales y no pueden rechazarse mientras el contrato esté vigente.
+
+6.7. Mejora del Servicio mediante Datos Agregados y Anonimizados
+Finalidad: Analizar patrones de uso agregados y anonimizados para mejorar funcionalidades y planificar capacidad.
+Base legal: Interés legítimo del Responsable, siempre que los datos estén correctamente anonimizados (k-anonimato, sin posibilidad de re-identificación).
+Opt-out: El Usuario puede solicitar la exclusión de estos procesos enviando email a nuventaargentina@gmail.com. Las garantías técnicas de anonimización se detallan en la Sección 15 de esta Política.
+
+6.8. Comunicaciones Comerciales y Marketing (Con Consentimiento Expreso)
+Finalidad: Informar sobre nuevas funcionalidades, planes disponibles, promociones u ofertas especiales.
+Base legal: Consentimiento expreso e informado del Usuario (Art. 5, inc. a, Ley 25.326). El Usuario puede revocar este consentimiento en cualquier momento haciendo clic en "Cancelar suscripción" en los emails comerciales o escribiendo a nuventaargentina@gmail.com.
+7. POLÍTICA DE COOKIES Y TECNOLOGÍAS DE SEGUIMIENTO
+NUVENTA adopta una política de cookies restrictiva: solo utiliza cookies estrictamente necesarias para el funcionamiento técnico del Servicio. No instala cookies de seguimiento, perfilado publicitario ni analítica de terceros.
+
+7.1. Cookies Estrictamente Necesarias
+Son las únicas cookies que NUVENTA utiliza. Su instalación no requiere consentimiento del Usuario ya que son indispensables para el funcionamiento del Servicio:
+•	Cookie de sesión autenticada: Identifica al Usuario logueado. Se elimina al cerrar el navegador o al hacer logout.
+•	Token CSRF (Cross-Site Request Forgery): Protege contra ataques de falsificación de solicitudes. Se regenera en cada sesión.
+•	Cookie de preferencias técnicas esenciales: Guarda configuraciones mínimas como idioma o zona horaria.
+•	Cookies de seguridad: Indicadores técnicos para detección de comportamiento anómalo.
+
+7.2. Cookies y Tecnologías que NUVENTA NO Utiliza
+NUVENTA declara expresamente que NO utiliza, instala ni permite la instalación de:
+•	Cookies de analítica o seguimiento de comportamiento (Google Analytics, Hotjar, Mixpanel, etc.).
+•	Cookies de publicidad comportamental o remarketing.
+•	Cookies de redes sociales (Facebook Pixel, Twitter, LinkedIn Insight, etc.).
+•	Web beacons, supercookies, device fingerprinting ni tecnologías similares de identificación persistente.
+•	Pixels de seguimiento en emails comerciales o transaccionales.
+
+7.3. Duración y Gestión de Cookies
+•	Cookies de sesión: Duración hasta que el Usuario cierre el navegador o la sesión activamente.
+•	Cookies técnicas de corta duración: Máximo 24 horas.
+El Usuario puede gestionar, bloquear o eliminar cookies desde la configuración de su navegador, aunque ello puede impedir el correcto funcionamiento de la plataforma.
+8. ALMACENAMIENTO E INFRAESTRUCTURA
+8.1. Ubicación del Almacenamiento
+Los datos personales son almacenados en servidores de Amazon Web Services (AWS), región US East 1 (Norte de Virginia, Estados Unidos de América). NUVENTA ha seleccionado AWS en razón de sus certificaciones internacionales de seguridad (ISO/IEC 27001, SOC 1, SOC 2, SOC 3, PCI DSS, FedRAMP).
+
+8.2. Transferencia Internacional de Datos
+Base legal para transferencia internacional (Art. 12 Ley 25.326):
+1. Base primaria – Necesidad contractual:
+La transferencia a servidores AWS ubicados en Estados Unidos es estrictamente necesaria para la ejecución del contrato de prestación del Servicio, dado que la infraestructura tecnológica de NUVENTA requiere procesamiento en la nube. Sin esta transferencia, el Servicio no puede prestarse.
+2. Base subsidiaria – Consentimiento expreso:
+Adicionalmente y de manera complementaria, el Usuario presta consentimiento informado y expreso para esta transferencia al aceptar la presente Política y los Términos del Servicio.
+3. Garantías implementadas:
+•	AWS mantiene certificaciones ISO/IEC 27001, SOC 2 Type II, PCI DSS Level 1.
+•	Standard Contractual Clauses (SCCs) incorporadas en el contrato con AWS.
+•	Medidas técnicas de cifrado en tránsito (TLS 1.3) y en reposo (AES-256).
+•	Auditorías periódicas de seguridad.
+•	Compromiso contractual de AWS de no acceder a datos salvo instrucción de NUVENTA.
+Derecho de oposición limitado:
+Si el Usuario se opone a esta transferencia internacional, lamentablemente NUVENTA no podrá prestar el Servicio, dado que constituye requisito técnico indispensable. En tal caso, el Usuario podrá cancelar conforme cláusulas de terminación con reembolso proporcional.
+
+8.3. Subprocesadores de Datos
+NUVENTA utiliza los siguientes terceros identificados que pueden tener acceso a datos personales en calidad de subprocesadores. Todos han sido seleccionados garantizando niveles de protección adecuados y están sujetos a obligaciones contractuales de confidencialidad:
+
+Subprocesador	Finalidad	País / Región	Certificaciones
+Amazon Web Services, Inc. (AWS)	Infraestructura de almacenamiento y cómputo	EE.UU. (US-East-1)	ISO 27001, SOC 2, PCI DSS
+MercadoPago S.A. (Grupo Mercado Libre)	Procesamiento de pagos	Argentina	PCI DSS Nivel 1
+SendGrid (Twilio Inc.)	Envío de emails transaccionales del sistema	EE.UU.	ISO 27001, SOC 2
+Google LLC (Google Workspace)	Gestión de comunicaciones y bandeja de correo del Responsable	EE.UU.	ISO 27001, SOC 2/3, Cláusulas contractuales tipo UE
+
+⚠ Nota: NUVENTA notificará al Usuario ante cambios en los subprocesadores que puedan afectar significativamente la seguridad o el tratamiento de sus datos, con una antelación mínima de 15 días corridos.
+9. PLAZOS DE CONSERVACIÓN DE DATOS
+9.1. Tabla de Plazos por Categoría de Dato
+Con el fin de evitar ambigüedades, NUVENTA establece los siguientes plazos diferenciados según la categoría de dato:
+
+Categoría de dato	Plazo de conservación	Fundamento
+Datos de cuenta y perfil de usuario	Vigencia del contrato + 6 meses post-cancelación	Prestación del servicio / reactivación
+Comprobantes fiscales y de facturación	10 años desde emisión	Art. 48 Ley 11.683 (AFIP) — obligación legal
+Registros de aceptación de Términos y Condiciones	10 años desde la aceptación	Valor probatorio contrato electrónico
+Datos de pago e historial de cobros	10 años desde la transacción	Normativa tributaria AFIP
+Logs de auditoría y seguridad	2 años	Seguridad e investigación de incidentes
+Datos requeridos en litigios activos o inminentes	Hasta resolución definitiva del proceso	Defensa en juicio
+
+⚠ ADVERTENCIA FISCAL: La normativa tributaria argentina (Ley 11.683) exige conservar documentación respaldatoria de operaciones comerciales por un mínimo de 10 años. NUVENTA conserva los datos de perfil de cuenta únicamente 6 meses post-cancelación. La exportación oportuna de datos operativos y su resguardo es responsabilidad exclusiva del Usuario (ver Sección 13).
+
+9.2. Eliminación Segura
+Al vencimiento de los plazos de conservación aplicables, NUVENTA procederá a la eliminación de datos mediante:
+•	Borrado lógico en bases de datos.
+•	Sobrescritura física en medios de almacenamiento cuando sea técnicamente viable.
+•	Purga de sistemas de backup y copias de seguridad que contengan los datos.
+•	Procedimientos consistentes con las mejores prácticas internacionales de eliminación segura (NIST SP 800-88).
+10. DERECHOS DE LOS TITULARES DE DATOS (DERECHOS ARCO + PORTABILIDAD)
+10.1. Derechos Reconocidos
+Conforme la Ley 25.326, el Usuario en calidad de titular de sus datos ante NUVENTA tiene los siguientes derechos:
+
+a) Derecho de Acceso (Art. 14 Ley 25.326)
+El titular tiene derecho a solicitar y obtener información sobre sus datos personales, la finalidad del tratamiento, el origen de los datos, el plazo de conservación y los destinatarios de posibles cesiones.
+
+b) Derecho de Rectificación (Art. 16 Ley 25.326)
+El titular tiene derecho a solicitar la corrección de datos inexactos, incompletos, desactualizados o que puedan inducir a error.
+
+c) Derecho de Cancelación o Supresión (Art. 16 Ley 25.326)
+El titular tiene derecho a solicitar la eliminación de sus datos cuando el tratamiento es ilícito, cuando los datos son innecesarios para los fines del tratamiento o cuando ha revocado el consentimiento. Este derecho puede verse limitado por obligaciones legales de conservación detalladas en la Sección 9.
+
+d) Derecho de Oposición (Art. 34 Decreto 1558/2001)
+El titular tiene derecho a oponerse al tratamiento de sus datos para fines de comunicaciones comerciales o marketing directo. NUVENTA cesará el tratamiento de forma inmediata ante el ejercicio de este derecho.
+
+e) Derecho de Portabilidad
+El Usuario puede exportar sus datos en formatos CSV y Excel desde la plataforma conforme las funcionalidades disponibles (Sección 13). NUVENTA no garantiza portabilidad en formato técnico estructurado más allá de lo indicado.
+
+10.2. Procedimiento para Ejercer los Derechos
+Para ejercer cualquiera de los derechos indicados, el titular debe:
+•	Enviar solicitud escrita al email: nuventaargentina@gmail.com
+•	Asunto del email: "[DERECHO SOLICITADO] — ARCO NUVENTA" (ej: "ACCESO — ARCO NUVENTA").
+•	Contenido obligatorio: (i) nombre completo; (ii) email registrado en cuenta NUVENTA; (iii) derecho que desea ejercer; (iv) descripción específica; (v) copia de DNI u otro documento identificatorio.
+•	NUVENTA acusará recibo dentro de las 48 horas hábiles y responderá fundadamente dentro de los 10 días hábiles desde la recepción de la solicitud completa (prorrogable 10 días hábiles adicionales notificando al titular).
+•	Si la solicitud es procedente, NUVENTA ejecutará la medida solicitada gratuitamente.
+
+10.3. Reclamación ante la Autoridad de Control
+Si el titular considera que NUVENTA no ha atendido correctamente su solicitud, puede presentar reclamación ante la AAIP:
+•	Sitio web: www.argentina.gob.ar/aaip
+•	Email: infopublica@jus.gov.ar
+•	Dirección: Av. Pte. Gral. Julio A. Roca 710, Piso 3, Buenos Aires, Argentina.
+11. MEDIDAS DE SEGURIDAD
+11.1. Compromiso de Seguridad
+NUVENTA implementa medidas de seguridad técnicas y organizativas razonables y adecuadas, conforme al estado del arte y a la naturaleza de los datos tratados, para proteger la información personal contra acceso no autorizado, alteración, divulgación, pérdida o destrucción (Art. 9 Ley 25.326; Resolución AAIP 47/2018).
+
+11.2. Medidas Técnicas Implementadas
+•	Cifrado en tránsito: Protocolo HTTPS/TLS para todas las comunicaciones.
+•	Cifrado de contraseñas: Hash criptográfico irreversible (bcrypt u algoritmo equivalente). Nunca en texto plano.
+•	Control de acceso basado en roles (RBAC): Principio de mínimo privilegio.
+•	Registros de auditoría (logs): Toda actividad crítica registrada con timestamp, IP y usuario.
+•	Monitoreo continuo: Detección automática de anomalías y comportamientos sospechosos.
+•	Actualizaciones de seguridad: Parches aplicados en plazos razonables desde su disponibilidad.
+•	Copias de seguridad (backups): Respaldos periódicos para garantizar continuidad operacional.
+•	Infraestructura certificada: AWS ISO/IEC 27001, SOC 1/2/3, PCI DSS.
+
+11.3. Medidas Organizativas
+•	Obligaciones contractuales de confidencialidad para todo el personal que accede a datos personales.
+•	Limitación de acceso humano a datos de usuarios a casos estrictamente justificados.
+•	Política interna de gestión de incidentes de seguridad.
+•	Evaluación periódica de riesgos de seguridad.
+
+11.4. Responsabilidad del Usuario
+La seguridad también depende de conductas del Usuario, quien es responsable de:
+•	Mantener confidenciales sus credenciales de acceso.
+•	Utilizar contraseñas seguras y únicas.
+•	Notificar a NUVENTA ante cualquier acceso no autorizado detectado.
+•	Mantener actualizados y seguros los dispositivos desde los cuales accede.
+
+11.5. Notificación de Brechas de Seguridad
+En caso de que NUVENTA tome conocimiento de una brecha de seguridad que afecte datos personales de los Usuarios y genere riesgo para sus derechos:
+•	Notificará a los Usuarios afectados dentro de las 72 horas corridas (calendario) desde la detección, salvo que la complejidad o extensión de la brecha justifique una extensión debidamente documentada. Este plazo es consistente con el estándar internacional RGPD/GDPR.
+•	Notificará a la AAIP conforme los procedimientos establecidos por dicho organismo.
+•	La notificación incluirá: naturaleza de la brecha, categorías y volumen aproximado de datos afectados, medidas adoptadas y recomendaciones para los titulares.
+
+ℹ Nota: La obligación de notificación no implica reconocimiento de responsabilidad por la brecha cuando ésta derive de causas ajenas al control de NUVENTA (ataques de terceros, fuerza mayor, fallas de infraestructura del proveedor).
+12. CESIÓN Y COMUNICACIÓN DE DATOS A TERCEROS
+12.1. Principio General: No Venta de Datos
+NUVENTA NO vende, alquila, cede a título oneroso ni comercializa los datos personales de los Usuarios a terceros bajo ninguna circunstancia. Los datos de los Usuarios no son el producto comercial de NUVENTA.
+
+12.2. Supuestos de Comunicación a Terceros
+a) Subprocesadores Necesarios (Sección 8.3)
+NUVENTA comparte datos con los subprocesadores identificados en la Sección 8.3, bajo obligaciones contractuales de confidencialidad y seguridad.
+
+b) Obligación Legal o Requerimiento de Autoridad Competente
+NUVENTA podrá divulgar datos ante orden judicial firme, requerimiento de fiscalía, AFIP, AAIP, UIF u otro organismo con competencia legal. Procurará notificar al Usuario con la anticipación que permita el plazo impuesto por la autoridad, salvo prohibición legal.
+
+c) Reorganización o Cesión del Negocio
+En caso de fusión, adquisición o reorganización del negocio NUVENTA, los datos podrán transferirse al sucesor, quien quedará sujeto a esta Política o una de igual o mayor protección. El Usuario será notificado con razonable anticipación.
+
+d) Consentimiento Expreso del Usuario
+Ante solicitud o autorización expresa del propio Usuario para compartir sus datos con un tercero específico.
+13. EXPORTACIÓN Y PORTABILIDAD DE DATOS DEL USUARIO
+El Usuario tiene derecho a exportar en cualquier momento los datos que haya ingresado en la plataforma, en los formatos disponibles (CSV, Excel/XLSX).
+
+Dado que NUVENTA conserva datos de cuenta únicamente por 6 meses tras la cancelación del Servicio (Sección 9), la exportación oportuna es fundamental para cumplir obligaciones de conservación documental ante AFIP y migrar información a otro sistema.
+
+Acceso a la exportación: Configuración > Datos > Exportar (requiere login con Usuario Administrador). Los archivos están disponibles para descarga durante 48 horas desde la generación.
+
+⚠ Importante: La omisión de exportar datos antes del vencimiento del plazo de retención implica la pérdida irreversible de dicha información, siendo esta consecuencia de exclusiva responsabilidad del Usuario.
+14. MENORES DE EDAD
+El Servicio NUVENTA está dirigido exclusivamente a personas mayores de 18 años con plena capacidad legal para contratar conforme a la legislación argentina.
+
+NUVENTA no recopila intencionalmente datos personales de menores de 18 años. Si llegara a tomar conocimiento de que ha procesado datos de menores sin el consentimiento de sus representantes legales, eliminará dichos datos de forma inmediata y cancelará la cuenta correspondiente.
+
+Si usted es padre, madre o tutor legal y tiene conocimiento de que un menor ha proporcionado datos a NUVENTA sin su consentimiento, contacte a nuventaargentina@gmail.com.
+15. USO DE DATOS AGREGADOS Y ESTADÍSTICOS
+NUVENTA podrá utilizar datos agregados, anonimizados y estadísticos derivados del uso del Servicio para mejora del producto conforme Sección 6.7. Garantías de anonimización:
+•	Los datos agregados nunca permiten identificar a un usuario individual.
+•	Se aplican técnicas de k-anonimato: cada agrupación estadística incluye un mínimo de usuarios que impide la re-identificación.
+•	Se eliminan identificadores directos (nombre, CUIT, email) antes de todo procesamiento estadístico.
+•	Los datos estadísticos no se venden ni ceden a terceros con fines comerciales ajenos a NUVENTA.
+
+El Usuario puede solicitar en cualquier momento su exclusión de los procesos de anonimización estadística enviando email a nuventaargentina@gmail.com, sin que ello afecte el acceso al Servicio.
+16. LIMITACIÓN DE RESPONSABILIDAD EN MATERIA DE PRIVACIDAD
+16.1. Exclusiones de Responsabilidad
+Sin perjuicio de las obligaciones asumidas en esta Política, NUVENTA no será responsable por:
+•	Brechas causadas por ataques cibernéticos sofisticados que superen las medidas de seguridad del estado del arte (zero-day exploits, APTs).
+•	Daños derivados de la negligencia del Usuario en la gestión de sus credenciales.
+•	Accesos no autorizados originados en dispositivos del Usuario infectados con malware.
+•	Datos personales ingresados por el Usuario sin base legal suficiente (responsabilidad exclusiva del Usuario como Responsable del Tratamiento).
+•	Fallas de seguridad imputables a subprocesadores (AWS, etc.) ajenas al control de NUVENTA.
+•	Consecuencias de la divulgación de credenciales por parte del propio Usuario.
+
+16.2. Responsabilidad Patrimonial Limitada
+Dado que NUVENTA es operado por una persona humana (emprendedor individual), la responsabilidad patrimonial máxima derivada de incumplimientos a esta Política se limita al monto efectivamente abonado por el Usuario en concepto de suscripción durante los últimos doce (12) meses calendario anteriores al hecho generador del daño, o la suma de pesos argentinos equivalente a USD 500 al tipo de cambio oficial del Banco Nación Argentina al momento del reclamo, lo que resulte mayor.
+
+Esta limitación no aplica a: (i) daños causados con dolo o culpa grave; (ii) violaciones que resulten en sanciones administrativas de la AAIP; (iii) derechos irrenunciables del consumidor conforme Ley 24.240.
+
+ℹ Nota: Los Usuarios conservan en todo caso el derecho a presentar reclamos ante la AAIP, la cual puede imponer sanciones administrativas independientes de cualquier limitación contractual.
+
+16.3. Registro ante la AAIP
+La base de datos de usuarios de NUVENTA ha sido inscripta o se encuentra en proceso de inscripción ante la Agencia de Acceso a la Información Pública (AAIP) en los términos del artículo 21 de la Ley 25.326 y su Decreto Reglamentario 1558/2001. El Responsable mantiene o gestionará dicha inscripción actualizada conforme las obligaciones legales vigentes.
+17. CONSENTIMIENTO PARA EL TRATAMIENTO DE DATOS
+17.1. Otorgamiento del Consentimiento
+Al registrarse en NUVENTA, el Usuario presta consentimiento libre, expreso, informado e inequívoco para el tratamiento de sus datos personales conforme esta Política (Art. 5 Ley 25.326) únicamente mediante alguno de los siguientes mecanismos activos:
+•	Marcación de casilla de verificación explícita (checkbox) con leyenda visible que refiere a esta Política.
+•	Click en botón de aceptación con texto que inequívocamente indique la aceptación de los Términos y la Política de Privacidad.
+
+ℹ Nota: El simple uso o acceso al Servicio NO constituye otorgamiento de consentimiento válido en ausencia de los mecanismos activos descriptos. NUVENTA conserva registro de la aceptación (fecha, hora, mecanismo, versión del documento).
+
+17.2. Consentimiento para Comunicaciones Comerciales
+El consentimiento para recibir comunicaciones comerciales (newsletters, promociones) es independiente del consentimiento operativo y puede ser revocado en cualquier momento sin afectar la prestación del Servicio.
+
+17.3. Revocación del Consentimiento
+El Usuario puede revocar su consentimiento en cualquier momento enviando solicitud a nuventaargentina@gmail.com. Sin embargo:
+•	La revocación no afecta la licitud del tratamiento previo.
+•	La revocación del consentimiento necesario para la prestación del Servicio implicará la imposibilidad de continuarlo, equivaliendo a solicitud de cancelación de cuenta.
+•	La revocación del consentimiento para comunicaciones comerciales no implica cancelación del Servicio.
+18. MODIFICACIONES A ESTA POLÍTICA
+NUVENTA se reserva el derecho de modificar esta Política para reflejar cambios normativos, técnicos u operativos. Toda modificación será notificada mediante:
+•	Publicación de la versión actualizada en www.nuventa.com.ar/politica-de-privacidad-clientes
+•	Aviso destacado dentro de la Plataforma al iniciar sesión.
+•	Email al correo registrado del Usuario con resumen de cambios sustanciales.
+
+Las modificaciones entrarán en vigencia a los 15 días corridos desde la notificación para cambios sustanciales, o de forma inmediata para ajustes formales menores o actualizaciones normativas imperativas.
+
+La continuación del uso del Servicio tras la entrada en vigencia implica aceptación. Si el Usuario no acepta los cambios, puede cancelar su suscripción y solicitar exportación de sus datos.
+
+NUVENTA mantendrá accesible el historial de versiones anteriores, identificadas por número de versión y fecha de vigencia.
+19. VÍNCULOS A SITIOS WEB DE TERCEROS
+La plataforma NUVENTA puede contener enlaces a sitios web de terceros. NUVENTA no es responsable de las prácticas de privacidad ni del contenido de dichos sitios externos. Se recomienda al Usuario revisar las políticas de privacidad de cada sitio que visite.
+20. CONTACTO PARA ASUNTOS DE PRIVACIDAD
+Responsable del Tratamiento: Lautaro Gelman
+Email de privacidad: nuventaargentina@gmail.com
+Asunto sugerido: "[PRIVACIDAD] — [Motivo de la consulta]"
+Domicilio legal: Virgen de Cuyo 2645, Maipú, Luzuriaga (CP 5513), Mendoza, Argentina
+Horario de atención: Lunes a viernes, 9:00 a 18:00 hs (UTC-3)
+
+NUVENTA acusará recibo de toda consulta de privacidad dentro de las 48 horas hábiles.
+21. DISPOSICIONES FINALES
+21.1. Integración con los Términos y Condiciones de Uso
+Esta Política forma parte integrante e indivisible de los Términos y Condiciones de Uso de NUVENTA (Versión 4.0, Vigente desde 13/02/2026). En caso de conflicto respecto de cuestiones de privacidad y protección de datos, prevalecerá la disposición más protectora para el titular.
+
+21.2. Divisibilidad
+Si cualquier disposición de esta Política fuera declarada nula o inaplicable, el resto mantendrá plena vigencia y efectividad.
+
+21.3. Ley Aplicable y Jurisdicción
+Ley Aplicable:
+Este contrato se rige e interpreta exclusivamente conforme a la legislación de la República Argentina, en particular:
+•	Código Civil y Comercial de la Nación (Ley 26.994).
+•	Ley 25.326 de Protección de Datos Personales.
+•	Ley 24.240 de Defensa del Consumidor.
+•	Ley 11.723 de Propiedad Intelectual.
+Jurisdicción Territorial:
+Para toda controversia, reclamo o disputa relacionada con este contrato, su interpretación, cumplimiento, incumplimiento, validez o nulidad, las partes se someten a la jurisdicción exclusiva de los TRIBUNALES CIVILES Y COMERCIALES DE LA PRIMERA CIRCUNSCRIPCIÓN JUDICIAL DE LA PROVINCIA DE MENDOZA, REPÚBLICA ARGENTINA, con asiento en la Ciudad de Mendoza (Capital), renunciando expresamente a cualquier otro fuero o jurisdicción que pudiera corresponderles.
+Protección del Consumidor – Opción de Fuero (Art. 36 Ley 24.240):
+Cuando el Usuario revista calidad de consumidor final conforme artículo 1° de la Ley 24.240 de Defensa del Consumidor:
+•	El consumidor PODRÁ OPTAR LIBREMENTE por demandar a NUVENTA ante los tribunales de la Primera Circunscripción Judicial de Mendoza, o ante los tribunales de su domicilio real (donde efectivamente reside).
+•	NUVENTA SOLO podrá demandar al consumidor ante los tribunales de Mendoza o los del domicilio del consumidor.
+•	Esta opción de fuero es irrenunciable e inmodificable (Art. 3 Ley 24.240).
+
+21.4. Disponibilidad del Documento
+•	URL: www.nuventa.com.ar/politica-de-privacidad-clientes
+
+
+─ FIN DEL DOCUMENTO ─
+NUVENTA — Política de Privacidad y Protección de Datos Personales
+Versión 1.0  |  Vigente desde: 17/02/2026  |  Última modificación: 17/02/2026
+Ley 25.326 de Protección de Datos Personales — República Argentina
+Para consultas: nuventaargentina@gmail.com  |  www.nuventa.com.ar/politica-de-privacidad-clientes
