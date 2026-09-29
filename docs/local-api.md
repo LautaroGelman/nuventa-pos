@@ -12,6 +12,12 @@
 Ventas completadas, devoluciones y gastos se confirman localmente antes de sincronizar. El POST de
 venta admite `clientSaleUuid`: repetir el mismo contenido devuelve la venta existente; cambiar el
 contenido con esa clave devuelve 409. Pagos, cantidades y totales se validan antes de mutar la base.
+El gasto con `withdrawFromMyCash` o la selección de la sesión local abierta se conserva en el
+outbox local. `sourceCashSessionId` de otra caja se envía a la nube con conexión; nunca se imputa
+al turno local ni se encola como si perteneciera a él. El backend valida la caja abierta y la
+sucursal. CAJERO puede registrar gastos operativos; los movimientos administrativos conservan
+sus restricciones. Sin conexión, elegir otra caja devuelve un error explícito.
+
 `GET /expense-categories` usa el catálogo local de la sucursal. Cajas disponibles e inventario de
 todas las sucursales priorizan la nube; el inventario de la sucursal activa funciona offline.
 

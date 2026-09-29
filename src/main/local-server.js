@@ -2665,7 +2665,7 @@ handlers['POST /returns/:id/fiscal-document/retry'] = async (req, res, body, rou
 
 // ─── CASH MOVEMENTS (expenses, injections, withdrawals) ─
 
-handlers['POST /expenses'] = async (req, res, body) => {
+handlers['POST /expenses'] = async (req, res, body, route) => {
   const db = getDb();
   if (blockIfSessionRevoked(db, res)) return; // A02
   const {
@@ -2701,12 +2701,39 @@ handlers['POST /expenses'] = async (req, res, body) => {
     return jsonResponse(res, 400, { error: `Tipo inválido. Valores permitidos: ${validTypes.join(', ')}` });
   }
 
+  const roles = getUserRoles().map(role => String(role).toUpperCase());
+  const cashier = roles.includes('ROLE_CAJERO');
+  if (roles.includes('ROLE_INVENTARIO') && !isAdminOrOwner() && !roles.includes('ROLE_MULTIFUNCION')
+      || cashier && (type !== 'EXPENSE' || String(categoryRef || '').startsWith('SYS::') || scope !== 'SESSION')) {
+    return jsonResponse(res, 403, { message: 'No tenés permisos para registrar este movimiento.' });
+  }
+  if (Number(route?.clientId) !== Number(getConfigVal(db, 'client_id'))
+      || Number(route?.sucursalId) !== Number(getConfigVal(db, 'sucursal_id'))) {
+    return jsonResponse(res, 403, { message: 'El gasto debe corresponder a la sucursal activa.' });
+  }
+  const currentSession = getScopedOpenCashSession(db);
+  const selectedSource = body.sourceCashSessionId;
+  if (selectedSource != null && (!Number.isSafeInteger(Number(selectedSource)) || Number(selectedSource) <= 0)) {
+    return jsonResponse(res, 400, { message: 'Seleccioná una caja de origen válida.' });
+  }
+  if (body.withdrawFromMyCash === true && !currentSession) {
+    return jsonResponse(res, 409, { message: 'Abrí un turno para registrar el gasto en tu caja.' });
+  }
+  // Availability exposes the cloud ID when synchronized, otherwise the local ID.
+  // Never silently charge the current register when the user selected another one.
+  const selectedIsCurrent = currentSession && Number(selectedSource) === Number(currentSession.cloud_id || currentSession.id);
+  if (selectedSource != null && body.withdrawFromMyCash !== true && !selectedIsCurrent) {
+    if (!apiClient.token || !await apiClient.isOnline()) {
+      return jsonResponse(res, 503, { message: 'Para registrar un gasto en otra caja necesitás conexión a internet.', offline: true });
+    }
+    return await proxyToCloud(req, res, req.method, req.url, body);
+  }
+
   if (type === 'EXPENSE' && !db.get('SELECT id FROM expense_categories WHERE id=? AND client_id=? AND sucursal_id=? AND active=1',
     [categoryId, Number(getConfigVal(db, 'client_id')), Number(getConfigVal(db, 'sucursal_id'))])) {
     return jsonResponse(res, 400, { error: 'Seleccioná una categoría de gasto vigente de esta sucursal.' });
   }
 
-  const currentSession = getScopedOpenCashSession(db);
   if (scope === 'SESSION' && !currentSession) return jsonResponse(res, 409, { error: 'Abrí un turno para registrar el movimiento.' });
 
   const employeeId = Number(getConfigVal(db, 'employee_id'));

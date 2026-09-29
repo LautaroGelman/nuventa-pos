@@ -33,6 +33,7 @@ function enqueue(payload={amount:1},key=crypto.randomUUID()){
 app.whenReady().then(async()=>{
  await database.initDatabase();db=database.getDb();port=await startLocalServer();
  try{
+  await require('./cash-expense-regressions')({db,apiClient,reset,request,record,port});
   reset();const before=db.get('SELECT COUNT(*) n FROM sales').n;const realFsync=fs.fsyncSync;
   fs.fsyncSync=()=>{const e=new Error('AUDIT injected ENOSPC');e.code='ENOSPC';throw e;};
   const diskFailure=await request('/sales',sale());fs.fsyncSync=realFsync;
