@@ -17,7 +17,10 @@ const ENV_URLS = {
 
 function isDev() { return _isDev; }
 function getEnvName() { return _isDev ? 'dev' : 'prod'; }
-function getEnvUrls() { return _isDev ? ENV_URLS.dev : ENV_URLS.prod; }
+function getEnvUrls() {
+  const qa = require('./qa-environment').resolveQaEnvironment({ packaged: app?.isPackaged === true });
+  return qa || (_isDev ? ENV_URLS.dev : ENV_URLS.prod);
+}
 
 const DEFAULTS = {
   windowWidth: 1280,

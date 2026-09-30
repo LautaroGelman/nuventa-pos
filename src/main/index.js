@@ -9,6 +9,8 @@
 const { app, BrowserWindow, ipcMain, dialog, session, Menu, net, shell, powerSaveBlocker } = require('electron');
 const path = require('path');
 const fs   = require('fs');
+// Must run before any module opens the config, SQLite or a persistent session.
+require('./qa-environment').initializeQaEnvironment(app);
 const configStore = require('./config-store');
 const {
   initDatabase, getDb, closeDatabase, backupDatabaseForUpdate,

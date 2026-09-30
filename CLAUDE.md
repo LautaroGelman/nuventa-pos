@@ -17,13 +17,14 @@ backend (Spring Boot en la nube). Acá no hay componentes de React ni endpoints 
 
 ## 2. Stack y restricciones
 
-- **Runtime:** Electron 33, Node.js (proceso main). Sin TypeScript, sin transpilación, sin
+- **Runtime:** Electron 44, Node.js (proceso main). Sin TypeScript, sin transpilación, sin
   bundler. Es **JavaScript plano con `require()` (CommonJS)**. Lo que editás es lo que corre.
 - **Base de datos:** `sql.js` (SQLite compilado a WASM). **No es better-sqlite3.** La DB es un
   buffer en memoria que se serializa a disco; ver §5.
-- **Sin framework de tests.** No hay suite de pruebas. No inventes `npm test`.
+- **Tests:** Node test runner (`npm test`) y regresiones SQLite/HTTP en Electron main
+  (`npm run test:regressions`). Ver [QA local aislado](docs/qa-local.md) para el harness real.
 - **Plataforma objetivo:** Windows (electron-builder → NSIS + portable).
-- **Dependencias de producción:** solo `sql.js`. Todo lo demás es API nativa de Electron/Node.
+- **Dependencias de producción:** `sql.js` y `electron-updater`; además de APIs nativas de Electron/Node.
 
 ## 3. Mapa de archivos (dónde tocar según la tarea)
 
@@ -48,11 +49,14 @@ Todo el código editable está en `src/`. Tamaños aproximados entre paréntesis
 npm install          # deps
 npm start            # correr en PROD (nuventa.com.ar)
 npm run start:dev    # correr en DEV (localhost:3000 / :8080) — abre DevTools
+npm test            # suite Node test runner
+npm run test:regressions # escenarios Electron main/SQLite/HTTP controlados
 npm run build:web    # compila el frontend hermano y lo copia a resources/web/
 npm run build        # instalador NSIS para Windows
 ```
 
-No hay linter, formatter ni tests configurados. Respetá el estilo existente (ver §6).
+No hay linter ni formatter configurados. Respetá el estilo existente (ver §6).
+Para una instancia QA con URL local y perfil nuevo, seguí [docs/qa-local.md](docs/qa-local.md).
 
 ## 5. Modelo mental imprescindible
 
