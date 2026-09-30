@@ -17,6 +17,7 @@ const imageCache = require('./image-cache');
 // ── Login event emitter ──────────────────────────────────
 // index.js listens on this to: start sync + forward status to renderer
 const loginEvents = new EventEmitter();
+let tiendanubeSaleSync = null;
 
 // Centraliza los rechazos de autenticación detectados tanto por el proxy como por el sync.
 // El main process consume este evento para limpiar credenciales, avisar y volver al login.
@@ -711,6 +712,7 @@ const CLOUD_ONLY_PATTERNS = [
   /^\/categories/,
   /^\/purchase-orders/,
   /^\/mercadopago\//,
+  /^\/tiendanube(\/|$)/,  // Tiendanube config/links/orders: solo existe en la nube (dueño/admin)
   /^\/promotions$/,        // GET/POST promotions list (not /apply)
   /^\/promotions\/\d+/,    // PUT/DELETE specific promotion
   /^\/sucursales$/,         // branch management
@@ -1130,6 +1132,12 @@ handlers['GET /expense-categories'] = async (req, res) => {
 };
 
 handlers['POST /sales'] = async (req, res, body) => {
+  const saleAuthEpoch = apiClient.authEpoch;
+  return require('./tiendanube-policy').exclusive(`${apiClient.clientId}:${apiClient.sucursalId}`, async (saleScope) => {
+  if (saleAuthEpoch !== apiClient.authEpoch)
+    return jsonResponse(res, 409, { error: 'La sesión cambió antes de registrar la venta. Reintentá.' });
+  if (saleScope !== `${apiClient.clientId}:${apiClient.sucursalId}`)
+    return jsonResponse(res, 409, { error: 'La sucursal cambió antes de registrar la venta. Reintentá.' });
   const db = getDb();
   if (blockIfSessionRevoked(db, res)) return; // A02
   // Una reserva para un cobro integrado necesita el ID remoto antes de crear la orden.
@@ -1151,6 +1159,16 @@ handlers['POST /sales'] = async (req, res, body) => {
     }
     return jsonResponse(res, 200, { ...localSaleToDto(db, previous), id: previous.local_id,
       saleId: previous.local_id, offlineCreated: true, duplicate: true });
+  }
+  try {
+    await require('./tiendanube-policy').prepareSale(db, apiClient, body.items, tiendanubeSaleSync);
+  } catch (error) {
+    return jsonResponse(res, error.status || 503, { error: error.message });
+  }
+  if (saleAuthEpoch !== apiClient.authEpoch || blockIfSessionRevoked(db, res)) {
+    if (saleAuthEpoch !== apiClient.authEpoch)
+      return jsonResponse(res, 409, { error: 'La sesión cambió durante la comprobación de stock. Reintentá.' });
+    return;
   }
   const {
     saleDate, employeeId, status = 'COMPLETED',
@@ -1401,6 +1419,7 @@ handlers['POST /sales'] = async (req, res, body) => {
     status,
     offlineCreated: true,
   });
+});
 };
 
 handlers['GET /sales'] = async (req, res, body, route, query) => {
@@ -3296,4 +3315,6 @@ function getServerPort() {
   return serverPort;
 }
 
-module.exports = { startLocalServer, stopLocalServer, getServerPort, loginEvents };
+module.exports = { startLocalServer, stopLocalServer, getServerPort, loginEvents,
+  setTiendanubeSaleSync: (handler) => { tiendanubeSaleSync = handler; },
+};

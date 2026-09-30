@@ -70,6 +70,10 @@ contextBridge.exposeInMainWorld('nuventaSync', {
   },
 });
 
+contextBridge.exposeInMainWorld('nuventaTiendanube', {
+  authorize: (url) => ipcRenderer.invoke('tiendanube:authorize', url),
+});
+
 contextBridge.exposeInMainWorld('nuventaUpdater', {
   getStatus: () => ipcRenderer.invoke('updater:status'),
   check: () => ipcRenderer.invoke('updater:check'),

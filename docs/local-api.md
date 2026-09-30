@@ -305,3 +305,10 @@ usa el cálculo del backend para combos, precios mayoristas y promociones por me
 Sin conexión conserva el subtotal sin promociones; no existe aún un catálogo de promociones
 sincronizado para calcularlas offline. Regresión:
 `cashier_wholesale_prices_and_online_calculation_are_scoped`.
+
+## Tiendanube
+
+Las rutas `/tiendanube` de configuración son cloud-only para dueño/administrador. La política
+operativa consulta directamente el endpoint POS `/pos-sync/tiendanube` con el JWT de la sesión
+activa. Sincronización rápida, verificación de reservas antes de vender y condiciones offline:
+[Tiendanube en el POS](tiendanube.md). La ventana de OAuth usa una sesión aislada, sin preload.

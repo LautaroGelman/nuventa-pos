@@ -82,6 +82,7 @@ async function run() {
     db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('employee_id', '6')");
     db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('employee_name', 'Cajero Smoke')");
     db.run("INSERT OR REPLACE INTO app_config (key, value) VALUES ('roles', '[\"ROLE_CAJERO\"]')");
+    db.run('INSERT OR REPLACE INTO app_config(key,value) VALUES (?,?)', ['tiendanube:1:1', JSON.stringify({ active: false, linkedProductIds: [], availableStock: {} })]);
     db.run("INSERT INTO cash_registers (id, code, name, active, client_id, sucursal_id) VALUES (77, 'SMOKE', 'Caja Smoke', 1, 1, 1)");
     db.run("INSERT INTO products (id, code, name, price, quantity, active, client_id, sucursal_id) VALUES (701, 'SALE-SMOKE', 'Producto Smoke', 100, 5, 1, 1, 1)");
     db.save();

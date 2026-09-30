@@ -513,6 +513,20 @@ function handleTokenCleared() {
 // ── IPC Handlers ─────────────────────────────────────────
 
 function registerIpcHandlers() {
+  let tiendanubeAuthorization = null;
+  ipcMain.handle('tiendanube:authorize', async (event, authorizeUrl) => {
+    if (!isTrustedSender(event) || event.sender !== mainWindow?.webContents || !apiClient.token)
+      throw new Error('Iniciá sesión para vincular Tiendanube.');
+    if (tiendanubeAuthorization) throw new Error('Ya hay una vinculación en curso.');
+    const epoch = apiClient.authEpoch;
+    try {
+      tiendanubeAuthorization = require('./tiendanube-oauth').authorizeTiendanube({ BrowserWindow,
+        parent: mainWindow, authorizeUrl, webAppUrl: configStore.get('webAppUrl') });
+      const result = await tiendanubeAuthorization;
+      if (epoch !== apiClient.authEpoch) throw new Error('La sesión cambió durante la vinculación. Reintentá.');
+      return result;
+    } finally { tiendanubeAuthorization = null; }
+  });
   // Environment info — D05: solo a frames confiables (no exponer URLs internas a páginas externas).
   ipcMain.handle('config:get-env', (event) => {
     if (!isTrustedSender(event)) return {};
@@ -1128,6 +1142,7 @@ app.whenReady().then(async () => {
 
   // 9. Start sync service (will run if auth is available)
   syncService = new SyncService();
+  require('./local-server').setTiendanubeSaleSync(() => syncService.flushForTiendanubeSale());
   syncService.on('sync-status', (status) => {
     isOffline = !status.online;
     // Forward to renderer so SyncButton can update

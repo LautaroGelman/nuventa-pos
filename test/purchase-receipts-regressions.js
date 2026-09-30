@@ -34,6 +34,7 @@ app.whenReady().then(async () => {
       db.run("INSERT INTO cash_registers(id,name,active,client_id,sucursal_id) VALUES(77,'Test',1,1,1)");
       db.run("INSERT INTO cash_sessions(client_session_uuid,client_id,sucursal_id,employee_id,status,business_date,opening_time,initial_amount,expected_amount,cash_register_id,sync_status) VALUES('test-session',1,1,6,'OPEN','2026-09-09','2026-09-09T09:00:00',0,0,77,'synced')");
       db.run('DELETE FROM sync_outbox');
+      db.run('INSERT OR REPLACE INTO app_config(key,value) VALUES (?,?)', ['tiendanube:1:1', JSON.stringify({ active: false, linkedProductIds: [], availableStock: {} })]);
     });
     apiClient.setAuth({ token: 'synthetic-purchases-token', clientId: 1, sucursalId: 1, employeeId: 6 });
     apiClient.setBaseUrl('http://127.0.0.1:9'); apiClient.isOnline = async () => false;

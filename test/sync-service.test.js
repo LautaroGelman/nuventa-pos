@@ -89,6 +89,31 @@ test('cambiar sucursal durante un ciclo sólo solicita descargar catálogo despu
   assert.equal(service._refreshAgain, false);
 });
 
+test('Tiendanube agrupa mutaciones y las sube en 500 ms, sin esperar la hora', (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const service = new SyncService(); const cycles = [];
+  service._getTiendanubeState = () => ({ active: true });
+  service.forceSync = async options => cycles.push(options);
+  for (let i = 0; i < 5; i++) service.notifyLocalMutation();
+  t.mock.timers.tick(499); assert.equal(cycles.length, 0);
+  t.mock.timers.tick(1); assert.deepEqual(cycles, [{ urgent: true }]);
+  service.notifyLocalMutation(); service.stop(); t.mock.timers.tick(500);
+  assert.equal(cycles.length, 1);
+});
+
+test('el control previo de Tiendanube rechaza un ciclo fallido o una sesión cambiada', async () => {
+  const service = new SyncService();
+  service.drain = async () => true;
+  service.forceSync = async () => {};
+  await assert.rejects(service.flushForTiendanubeSale(), /No se pudo confirmar/);
+  service.forceSync = async () => { service._successfulCycles++; };
+  await service.flushForTiendanubeSale();
+  const { apiClient } = require('../src/main/api-client'); const epoch = apiClient.authEpoch;
+  service.forceSync = async () => { service._successfulCycles++; apiClient.authEpoch++; };
+  try { await assert.rejects(service.flushForTiendanubeSale(), /No se pudo confirmar/); }
+  finally { apiClient.authEpoch = epoch; service.stop(); }
+});
+
 test('al cerrar sólo espera el ciclo en vuelo y no inicia red nueva', async () => {
   const service = new SyncService();
   const events = [];

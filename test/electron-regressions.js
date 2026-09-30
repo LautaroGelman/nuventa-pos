@@ -16,6 +16,7 @@ function reset(){
  db.transaction(()=>{
   for(const t of ['return_items','returns','sale_payments','sale_promotion_discounts','sale_items','sales','cash_movements','sync_outbox','cash_sessions','cash_registers','products','sync_state','app_config'])db.run(`DELETE FROM ${t}`);
   for(const [k,v]of Object.entries({auth_token:'audit-synthetic-token',client_id:'1',sucursal_id:'1',employee_id:'6',employee_name:'Audit cashier',roles:'["ROLE_CAJERO"]',last_online_at:new Date().toISOString()}))db.run('INSERT INTO app_config(key,value) VALUES (?,?)',[k,v]);
+  db.run('INSERT INTO app_config(key,value) VALUES (?,?)',['tiendanube:1:1',JSON.stringify({active:false,linkedProductIds:[],availableStock:{}})]);
   db.run("INSERT INTO products(id,code,name,price,quantity,client_id,sucursal_id,active) VALUES(701,'AUDIT','Audit product',100,100,1,1,1)");
   db.run("INSERT INTO cash_registers(id,name,active,client_id,sucursal_id) VALUES(77,'Audit register',1,1,1)");
   db.run("INSERT INTO cash_sessions(client_session_uuid,client_id,sucursal_id,employee_id,status,business_date,opening_time,initial_amount,expected_amount,cash_register_id,sync_status) VALUES('audit-session',1,1,6,'OPEN','2026-09-05','2026-09-05T09:00:00',0,0,77,'synced')");
@@ -34,6 +35,7 @@ app.whenReady().then(async()=>{
  await database.initDatabase();db=database.getDb();port=await startLocalServer();
  try{
   await require('./cash-expense-regressions')({db,apiClient,reset,request,record,port});
+  await require('./tiendanube-regressions')({db,apiClient,reset,request,record});
   reset();const before=db.get('SELECT COUNT(*) n FROM sales').n;const realFsync=fs.fsyncSync;
   fs.fsyncSync=()=>{const e=new Error('AUDIT injected ENOSPC');e.code='ENOSPC';throw e;};
   const diskFailure=await request('/sales',sale());fs.fsyncSync=realFsync;

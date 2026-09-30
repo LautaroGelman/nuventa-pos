@@ -14,6 +14,8 @@ const SYNC_INTERVAL_MS = 60 * 60 * 1000;
 const CASH_STATE_RETRY_MS = 15 * 1000;
 const V2_REPROBE_MS = 15 * 60 * 1000;
 const BATCH_SIZE = 20;
+const TIENDANUBE_POLL_MS = 15_000;
+const TIENDANUBE_MUTATION_DEBOUNCE_MS = 500;
 
 // Tras este nº de reintentos transitorios, una fila se escala a 'needs_review' (dead-letter, C15)
 // para que deje de reintentarse en silencio y aparezca para revisión manual.
@@ -90,6 +92,10 @@ class SyncService extends EventEmitter {
     this._bundleV2Available = null;
     this._lastV2ProbeAt = 0;
     this._bundle = new BundleSyncV2(apiClient);
+    this._tiendanubeTimer = null;
+    this._tiendanubeDebounce = null;
+    this._tiendanubePolling = false;
+    this._successfulCycles = 0;
   }
 
   start() {
@@ -97,6 +103,8 @@ class SyncService extends EventEmitter {
     console.log('[SYNC] Service started — automatic sync every 60 minutes; immediate cash close sync');
     this._timer = setInterval(() => this.forceSync(), SYNC_INTERVAL_MS);
     this._cashStateTimer = setInterval(() => this._retryPendingCashState(), CASH_STATE_RETRY_MS);
+    this._tiendanubeTimer = setInterval(() => void this._pollTiendanube(), TIENDANUBE_POLL_MS);
+    void this._pollTiendanube();
     void this.refreshCatalog();
     this._retryPendingCashState();
   }
@@ -104,6 +112,8 @@ class SyncService extends EventEmitter {
   stop() {
     if (this._timer)      { clearInterval(this._timer);      this._timer      = null; }
     if (this._cashStateTimer) { clearInterval(this._cashStateTimer); this._cashStateTimer = null; }
+    if (this._tiendanubeTimer) { clearInterval(this._tiendanubeTimer); this._tiendanubeTimer = null; }
+    if (this._tiendanubeDebounce) { clearTimeout(this._tiendanubeDebounce); this._tiendanubeDebounce = null; }
     this._runAgain = false;
     this._refreshAgain = false;
     this._urgentAgain = false;
@@ -124,6 +134,39 @@ class SyncService extends EventEmitter {
   notifyLocalMutation() {
     // Update the pending badge without scheduling network activity.
     this.emit('sync-status', { online: this._lastOnline, syncing: this._running });
+    try {
+      if (this._getTiendanubeState()?.active && !this._tiendanubeDebounce) {
+        const epoch = apiClient.authEpoch;
+        this._tiendanubeDebounce = setTimeout(() => {
+          this._tiendanubeDebounce = null;
+          if (apiClient.authEpoch === epoch) void this.forceSync({ urgent: true });
+        }, TIENDANUBE_MUTATION_DEBOUNCE_MS);
+      }
+    } catch { /* Database may be unavailable during startup/shutdown. */ }
+  }
+
+  _getTiendanubeState() {
+    return require('./tiendanube-policy').cached(getDb(), apiClient);
+  }
+
+  async _pollTiendanube() {
+    if (this._tiendanubePolling || !apiClient.token || !apiClient.clientId || !apiClient.sucursalId
+        || require('./offline-session').isOfflineSession(apiClient.token)) return;
+    this._tiendanubePolling = true;
+    try {
+      const state = await require('./tiendanube-policy').refresh(getDb(), apiClient);
+      if (state.active && this._timer) await this.forceSync({ urgent: true });
+    } catch { /* Keep the last durable policy; shared sales fail closed on their own check. */ }
+    finally { this._tiendanubePolling = false; }
+  }
+
+  async flushForTiendanubeSale() {
+    const epoch = apiClient.authEpoch;
+    if (!await this.drain(20_000)) throw new Error('La sincronización sigue en curso. Esperá antes de cobrar.');
+    const completed = this._successfulCycles;
+    await this.forceSync({ urgent: true });
+    if (!await this.drain(20_000) || apiClient.authEpoch !== epoch || this._successfulCycles <= completed)
+      throw new Error('No se pudo confirmar la sincronización. Conectate antes de cobrar productos de Tiendanube.');
   }
 
   _hasPendingCashSession(status = 'CLOSED') {
@@ -235,6 +278,7 @@ class SyncService extends EventEmitter {
             });
           }
           this.emit('sync-status', { online: true, syncing: false, protocolVersion: 2 });
+          if (!cashStateOnly) this._successfulCycles++;
           // Retryable rows remain queued until the next hourly cycle or manual request.
           return;
         } catch (error) {
@@ -295,6 +339,7 @@ class SyncService extends EventEmitter {
       }
 
       this.emit('sync-status', { online: true, syncing: false });
+      if (stillSameAuth()) this._successfulCycles++;
     } catch (err) {
       console.error('[SYNC] Tick error:', err.message);
       this.emit('sync-status', { online: false, syncing: false });
