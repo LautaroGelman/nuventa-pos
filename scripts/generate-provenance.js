@@ -8,7 +8,7 @@ const root = path.resolve(__dirname, '..');
 const workspace = path.dirname(root);
 const repos = {
   pos: root,
-  frontend: process.env.NUVENTA_FRONTEND_DIR || path.join(workspace, 'nuventa-frontend-mp-orders'),
+  frontend: process.env.NUVENTA_FRONTEND_DIR || path.join(workspace, 'nuventa-frontend-dev'),
   backend: process.env.NUVENTA_BACKEND_DIR || path.join(workspace, 'nuventa-backend-mp-orders'),
 };
 
