@@ -1029,6 +1029,7 @@ function productToDto(p) {
     // Pesable: el POS lo necesita para resolver el PLU de una etiqueta de balanza escaneada.
     weighable: !!p.weighable,
     maxUnitPrice: p.max_unit_price ?? null,
+    sku: p.sku || null,
     imageUrl: imageCache.getLocalUrl(p.id, 'image', p.image_url) || p.image_url || null,
     thumbnailUrl: imageCache.getLocalUrl(p.id, 'thumbnail', p.thumbnail_url) || p.thumbnail_url || null,
   };
@@ -3175,7 +3176,7 @@ function startLocalServer() {
           if (req.method === 'PATCH' && !canManageInventory()) return jsonResponse(res, 403, { error: 'No tenés permisos para modificar las preferencias.' });
           const preferences = require('./product-form-preferences');
           if (req.method === 'PATCH') {
-            if (!body || Object.keys(body).some(key => !['wholesaleEnabled', 'photoEnabled'].includes(key) || typeof body[key] !== 'boolean'))
+            if (!body || Object.keys(body).some(key => !['wholesaleEnabled', 'photoEnabled', 'skuEnabled'].includes(key) || typeof body[key] !== 'boolean'))
               return jsonResponse(res, 400, { error: 'Preferencias inválidas.' });
             preferences.patchPreferences(db, route.clientId, route.sucursalId, body);
           }

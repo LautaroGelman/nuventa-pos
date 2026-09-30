@@ -8,7 +8,7 @@ function read(db, key, fallback) {
 }
 function getPreferences(db, clientId, branchId) {
   const key = keys(clientId, branchId);
-  return { wholesaleEnabled: false, photoEnabled: false, ...read(db, key.value, {}), ...read(db, key.pending, {}).patch };
+  return { wholesaleEnabled: false, photoEnabled: false, skuEnabled: false, ...read(db, key.value, {}), ...read(db, key.pending, {}).patch };
 }
 function patchPreferences(db, clientId, branchId, patch) {
   const key = keys(clientId, branchId);

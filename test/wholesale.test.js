@@ -25,9 +25,12 @@ test('preferencias sobreviven reinicio, aíslan sucursales y conservan cambios d
     return {wholesaleEnabled:true,photoEnabled:false};
   }};
   await syncPreferences(db,api,1,10);
-  assert.deepEqual(getPreferences(db,1,10),{wholesaleEnabled:true,photoEnabled:true});
+  assert.deepEqual(getPreferences(db,1,10),{wholesaleEnabled:true,photoEnabled:true,skuEnabled:false});
   api._fetch = async (_url,options) => JSON.parse(options.body);
   await syncPreferences(db,api,1,10);
   assert.equal(db.get('SELECT value FROM app_config WHERE key=?',['product_form_preferences_pending:1:10']),undefined);
+  patchPreferences(db,1,10,{skuEnabled:true});
+  assert.equal(getPreferences(db,1,10).skuEnabled,true);
+  assert.equal(getPreferences(db,1,11).skuEnabled,false);
   raw.close();
 });

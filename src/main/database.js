@@ -259,6 +259,8 @@ function runMigrations() {
     -- la etiqueta. No se le descuenta stock (ver local-server.js).
     weighable               INTEGER DEFAULT 0,
     max_unit_price          REAL,
+    -- SKU opcional del comercio (se publica en Tiendanube). Solo lectura en el POS.
+    sku                     TEXT,
     name                    TEXT NOT NULL,
     description             TEXT,
     price                   REAL NOT NULL,
@@ -541,6 +543,9 @@ function runMigrations() {
   for (const stmt of v5Columns) {
     try { db.run(stmt); } catch (_) { /* column already exists */ }
   }
+
+  // ── SKU opcional del producto: llega con el catálogo para mostrarlo y buscar por él ──
+  try { db.run('ALTER TABLE products ADD COLUMN sku TEXT'); } catch (_) { /* column already exists */ }
 
   // ── v6: precio EFECTIVO vs. precio ENVIADO por el cliente en un ítem de venta ──
   // `unit_price` pasa a ser siempre el precio efectivo de la línea (resuelto del catálogo local

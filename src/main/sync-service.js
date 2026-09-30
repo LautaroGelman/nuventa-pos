@@ -978,16 +978,16 @@ class SyncService extends EventEmitter {
         // no entrada de usuario → seguro interpolar).
         const qtyClause = pendingProductIds.has(p.id) ? '' : 'quantity=excluded.quantity,';
         db.run(`
-          INSERT INTO products (id, code, no_code, stock_tracked, weighable, max_unit_price,
+          INSERT INTO products (id, code, no_code, stock_tracked, weighable, max_unit_price, sku,
             name, description, price, cost, cost_derived, quantity, cloud_quantity,
             catalog_revision, price_proof, low_stock_threshold, reorder_qty_default,
             preferred_provider_id, preferred_provider_name,
             category_ids, subcategory_ids, provider_ids, image_url, thumbnail_url,
             client_id, sucursal_id, active, synced_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)
           ON CONFLICT(id) DO UPDATE SET
             code=excluded.code, no_code=excluded.no_code, stock_tracked=excluded.stock_tracked,
-            weighable=excluded.weighable, max_unit_price=excluded.max_unit_price,
+            weighable=excluded.weighable, max_unit_price=excluded.max_unit_price, sku=excluded.sku,
             name=excluded.name,
             description=excluded.description, price=excluded.price, cost=excluded.cost,
             cost_derived=excluded.cost_derived, ${qtyClause}
@@ -1004,7 +1004,7 @@ class SyncService extends EventEmitter {
             active=1, synced_at=excluded.synced_at
         `, [
           p.id, p.code || null, p.noCode ? 1 : 0, p.stockTracked === false ? 0 : 1,
-          p.weighable ? 1 : 0, p.maxUnitPrice ?? null,
+          p.weighable ? 1 : 0, p.maxUnitPrice ?? null, p.sku || null,
           p.name, p.description || null,
           p.price, p.cost || null, p.costDerived ? 1 : 0, p.quantity ?? 0, p.quantity ?? 0,
           Number(p.catalogRevision || 0), p.priceProof || null,

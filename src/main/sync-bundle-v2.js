@@ -322,14 +322,14 @@ function applyProduct(db, change, now, clientId, sucursalId, pendingCosts) {
     effectiveQuantity = local.quantity; cloudQuantity = local.cloud_quantity;
   }
   db.run(`INSERT INTO products
-    (id,code,no_code,stock_tracked,weighable,max_unit_price,name,description,price,cost,
+    (id,code,no_code,stock_tracked,weighable,max_unit_price,sku,name,description,price,cost,
      cost_derived,quantity,cloud_quantity,catalog_revision,price_proof,low_stock_threshold,
      reorder_qty_default,preferred_provider_id,preferred_provider_name,category_ids,
      subcategory_ids,provider_ids,image_url,thumbnail_url,client_id,sucursal_id,active,synced_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
     ON CONFLICT(id) DO UPDATE SET
      code=excluded.code,no_code=excluded.no_code,stock_tracked=excluded.stock_tracked,
-     weighable=excluded.weighable,max_unit_price=excluded.max_unit_price,name=excluded.name,
+     weighable=excluded.weighable,max_unit_price=excluded.max_unit_price,sku=excluded.sku,name=excluded.name,
      description=excluded.description,price=excluded.price,cost=excluded.cost,
      cost_derived=excluded.cost_derived,quantity=excluded.quantity,
      cloud_quantity=excluded.cloud_quantity,catalog_revision=excluded.catalog_revision,
@@ -342,7 +342,7 @@ function applyProduct(db, change, now, clientId, sucursalId, pendingCosts) {
       thumbnail_url=excluded.thumbnail_url,client_id=excluded.client_id,
       sucursal_id=excluded.sucursal_id,active=1,synced_at=excluded.synced_at`, [
     product.id, product.code || null, product.noCode ? 1 : 0, product.stockTracked === false ? 0 : 1,
-    product.weighable ? 1 : 0, product.maxUnitPrice ?? null, product.name,
+    product.weighable ? 1 : 0, product.maxUnitPrice ?? null, product.sku || null, product.name,
     product.description || null, Number(product.price || 0), product.cost ?? null,
     product.costDerived ? 1 : 0, effectiveQuantity, cloudQuantity,
     Number(product.catalogRevision || change.revision || 0), product.priceProof || null,

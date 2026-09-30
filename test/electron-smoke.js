@@ -187,6 +187,11 @@ async function run() {
       items: [{ productId: 701, quantity: 1 }],
       payments: [{ paymentMethod: 'EFECTIVO', amount: 100 }],
     };
+    // The branch already passed the post-upgrade online check and shares no products with Tiendanube,
+    // so ordinary offline rules apply (tiendanube-policy.prepareSale uses this exact cache key).
+    db.run('INSERT OR REPLACE INTO app_config (key, value) VALUES (?, ?)',
+      [`tiendanube:${Number(apiClient.clientId)}:${Number(apiClient.sucursalId)}`,
+        JSON.stringify({ active: false, linkedProductIds: [], availableStock: {}, checkedAt: Date.now() })]);
     const saleWithoutShift = await fetch(`${branchUrl}/sales`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
