@@ -3210,6 +3210,21 @@ function startLocalServer() {
           return await proxyToCloud(req, res, req.method, fullUrl, body);
         }
 
+        // Internal identifiers are assigned only by the cloud, never put in the offline outbox.
+        const internalCodeRoute = require('./sync-bundle-v2').internalCodeRoute(subpath, req.method, body);
+        if (internalCodeRoute === 'reject')
+          return jsonResponse(res, 400, { error: 'El código interno solo se genera al crear o editar desde Inventario.' });
+        if (internalCodeRoute === 'forward') {
+          const db = getDb();
+          if (!canManageInventory()) return jsonResponse(res, 403, { error: 'No tenés permisos para generar códigos internos.' });
+          if (Number(route.clientId) !== Number(getConfigVal(db, 'client_id')) || Number(route.sucursalId) !== Number(getConfigVal(db, 'sucursal_id')))
+            return jsonResponse(res, 403, { error: 'Elegí la sucursal activa para generar el código.' });
+          return await proxyToCloud(req, res, req.method, req.url, body, { onSuccessJson: product => {
+            require('./sync-bundle-v2').cacheInternalCodeProduct(db, product, Number(route.clientId), Number(route.sucursalId));
+            loginEvents.emit('local-mutation', { method: req.method, path: subpath });
+          } });
+        }
+
         // ── Product creation: block cajero ──
         if (subpath === '/items' && req.method === 'POST') {
           if (!canManageInventory()) {

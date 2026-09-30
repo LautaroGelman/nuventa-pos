@@ -305,13 +305,19 @@ class PrinterService {
     if (!buffer.length || buffer.length > MAX_PDF_BYTES || !buffer.subarray(0, 5).equals(Buffer.from('%PDF-'))) {
       return Promise.resolve(this._result(crypto.randomUUID(), false, 'FAILED', 'INVALID_PDF', 'PDF vacío, inválido o demasiado grande (máx. 20 MB).'));
     }
+    const labelSize = opts.labelSize;
+    if (labelSize != null && (!Number.isFinite(labelSize.width) || !Number.isFinite(labelSize.height)
+        || labelSize.width < 30 || labelSize.width > 210 || labelSize.height < 20 || labelSize.height > 297
+        || typeof opts.deviceName !== 'string' || !opts.deviceName.trim())) {
+      return Promise.resolve(this._result(crypto.randomUUID(), false, 'FAILED', 'INVALID_LABEL_SIZE', 'Revisá el tamaño de papel y elegí la impresora de etiquetas.'));
+    }
     const requestId = typeof opts.requestId === 'string' ? opts.requestId.slice(0, 160) : '';
     return this._enqueue('PDF', requestId, opts.automatic === true, async (jobId) => {
       const deviceName = await this._resolveDevice(webContents, opts.deviceName);
       const tempPath = path.join(this.getTempPath(), `nuventa-print-${jobId}.pdf`);
       this.fs.writeFileSync(tempPath, buffer);
       const paperFormat = PAPER_FORMATS.has(opts.paperFormat) ? opts.paperFormat : this.getConfig().paperFormat;
-      return this._printFile(jobId, tempPath, deviceName, true, paperFormat);
+      return this._printFile(jobId, tempPath, deviceName, true, paperFormat, labelSize);
     });
   }
 
@@ -335,7 +341,7 @@ class PrinterService {
     });
   }
 
-  async _printFile(jobId, tempPath, deviceName, isPdf, paperFormat = null) {
+  async _printFile(jobId, tempPath, deviceName, isPdf, paperFormat = null, labelSize = null) {
     let printWindow = null;
     try {
       printWindow = new this.BrowserWindow({
@@ -351,7 +357,8 @@ class PrinterService {
       await printWindow.loadURL(pathToFileURL(tempPath).href);
       if (this.renderDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, this.renderDelayMs));
       let pageSize;
-      if (!isPdf && paperFormat === 'A4') pageSize = 'A4';
+      if (labelSize) pageSize = { width: Math.round(labelSize.width * 1000), height: Math.round(labelSize.height * 1000) };
+      else if (!isPdf && paperFormat === 'A4') pageSize = 'A4';
       else if (!isPdf && PAPER_FORMATS.has(paperFormat)) {
         const heightPx = await printWindow.webContents.executeJavaScript('Math.ceil(document.body.getBoundingClientRect().height)');
         pageSize = {
@@ -378,7 +385,8 @@ class PrinterService {
           printBackground: true,
           deviceName: deviceName || undefined,
           ...(pageSize ? { pageSize } : {}),
-          margins: { marginType: paperFormat === 'A4' ? 'default' : 'none' },
+          ...(labelSize ? { scaleFactor: 100 } : {}),
+          margins: { marginType: !labelSize && paperFormat === 'A4' ? 'default' : 'none' },
         }, (success, failureReason) => finish({ success, reason: failureReason || null, code: success ? null : 'SPOOLER_REJECTED' }));
       });
 

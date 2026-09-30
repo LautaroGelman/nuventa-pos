@@ -1,5 +1,19 @@
 # API local — Servidor HTTP offline
 
+## Códigos internos y etiquetas
+
+POST `/items` y PUT `/items/{id}` con `generateInternalCode: true` se reenvían a la nube
+para roles que administran inventario y solo en la sucursal activa. El cuerpo conserva
+`internalCodeRequestId` al reintentar. Cualquier otra ruta o método con ese flag (por ejemplo
+`/products`) responde 400. No se encola ni genera ningún código sin conexión.
+La respuesta confirmada se persiste en SQLite antes de responder al frontend; para filas
+existentes solo se actualizan código, `no_code` y control de stock, preservando movimientos
+y precios locales pendientes. El catálogo sincronizado concilia el resto de los datos.
+
+Las etiquetas PDF se generan en el frontend incluso offline. `nuventaPrinter.printPdf`
+acepta `labelSize: { width, height }` en mm y exige un `deviceName` explícito para etiquetas.
+Configura papel exacto, escala 100 % y márgenes cero. No cambia la impresora de tickets.
+
 > Referencia del servidor HTTP local: [../src/main/local-server.js](../src/main/local-server.js).
 > Emula la REST API del backend Spring Boot usando SQLite, sirve los estáticos del frontend y hace
 > de proxy a la nube cuando corresponde. Para el panorama general, ver

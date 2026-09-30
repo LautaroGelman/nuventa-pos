@@ -11,6 +11,25 @@ const {
 
 const PDF = Buffer.from('%PDF-1.4\n%%EOF');
 
+test('labels use their own printer and exact page size without changing ticket configuration', async () => {
+  const h = createHarness({ config: { selectedPrinter: 'Tickets' }, printers: [{ name: 'Labels' }, { name: 'Tickets' }] });
+  const result = await h.service.printPdf(h.sender, PDF, { deviceName: 'Labels', labelSize: { width: 50, height: 30 } });
+  assert.equal(result.success, true);
+  assert.equal(h.printCalls[0].deviceName, 'Labels');
+  assert.deepEqual(h.printCalls[0].pageSize, { width: 50000, height: 30000 });
+  assert.deepEqual(h.printCalls[0].margins, { marginType: 'none' });
+  assert.equal(h.printCalls[0].scaleFactor, 100);
+  assert.equal(h.store.data.selectedPrinter, 'Tickets');
+});
+
+test('invalid label size or missing explicit label printer does not spool', async () => {
+  const h = createHarness();
+  for (const options of [{ labelSize: { width: 50, height: 30 } }, { deviceName: 'Thermal', labelSize: { width: NaN, height: 30 } }]) {
+    assert.equal((await h.service.printPdf(h.sender, PDF, options)).success, false);
+  }
+  assert.equal(h.printCalls.length, 0);
+});
+
 function createConfigStore(initial = {}) {
   const data = { ...initial };
   return {

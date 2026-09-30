@@ -634,6 +634,28 @@ class BundleSyncV2 {
 }
 
 module.exports = {
+  // 'forward' for the one supported cloud route; 'reject' for any other request carrying the
+  // flag, so it can never fall through to a local handler and end up in the outbox.
+  internalCodeRoute(subpath, method, body) {
+    if (!body || body.generateInternalCode !== true) return null;
+    return (subpath === '/items' && method === 'POST') || (/^\/items\/\d+$/.test(subpath) && method === 'PUT')
+      ? 'forward' : 'reject';
+  },
+  cacheInternalCodeProduct(db, product, clientId, sucursalId) {
+    if (!Number.isSafeInteger(product.id) || product.id <= 0 || !/^NV\d{12}$/.test(product.code || ''))
+      throw new Error('Respuesta de código interno inválida. Reintentá la operación.');
+    const existing = db.get('SELECT * FROM products WHERE id=?', [product.id]);
+    if (existing && (Number(existing.client_id) !== Number(clientId) || Number(existing.sucursal_id) !== Number(sucursalId)))
+      throw new Error('El producto pertenece a otra sucursal.');
+    if (existing) {
+      // Keep local pending stock and pricing until the authoritative catalog revision arrives.
+      db.run('UPDATE products SET code=?,no_code=0,stock_tracked=? WHERE id=? AND client_id=? AND sucursal_id=?',
+        [product.code, product.stockTracked === false ? 0 : 1, product.id, clientId, sucursalId]);
+    } else {
+      applyProduct(db, { action: 'UPSERT', entityId: product.id, payload: product }, new Date().toISOString(), clientId, sucursalId, new Set());
+    }
+    db.save();
+  },
   BundleSyncV2,
   canonicalJson,
   sha256,
