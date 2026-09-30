@@ -1,0 +1,2 @@
+# Legal evidence must retain exactly the bytes whose SHA-256 was recorded (same rule as the frontend).
+resources/web/legal/*.txt -text
