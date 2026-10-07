@@ -76,6 +76,7 @@ function salePayload(db, outbox, clientId, sucursalId) {
       priceProof: item.price_proof || undefined,
       wholesaleMinimumQuantity: item.wholesale_minimum_quantity ?? undefined,
       customName: item.product_id == null ? item.product_name : undefined,
+      scaleLabel: item.scale_label || undefined,
     })),
     payments: payments.map((payment) => ({
       paymentMethod: payment.payment_method,

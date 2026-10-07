@@ -506,6 +506,7 @@ class SyncService extends EventEmitter {
             // product_name) como customName; el backend lo exige no-blank para esos ítems, si no la
             // venta independiente offline quedaba atrapada en needs_review.
             customName: i.product_id == null ? i.product_name : undefined,
+            scaleLabel: i.scale_label || undefined,
           })),
           payments: payments.map((p) => ({
             paymentMethod: p.payment_method,

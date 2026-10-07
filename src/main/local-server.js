@@ -1195,8 +1195,19 @@ handlers['POST /sales'] = async (req, res, body) => {
     if (it.unitPrice != null && (!Number.isFinite(Number(it.unitPrice)) || Number(it.unitPrice) < 0)) {
       return jsonResponse(res, 400, { error: 'Precio unitario inválido (no puede ser negativo).' });
     }
-    if (it.productId == null && !(it.customName && String(it.customName).trim())) {
+    if (it.productId == null && !it.scaleLabel && !(it.customName && String(it.customName).trim())) {
       return jsonResponse(res, 400, { error: 'Ítem independiente sin nombre.' });
+    }
+  }
+  // Scale labels without a product: name and amount are rebuilt from the label with the branch settings.
+  if (items.some((it) => it.scaleLabel)) {
+    const scaleSettings = safeJsonParse(getConfigVal(db, `scale_settings:${getConfigVal(db, 'client_id')}:${getConfigVal(db, 'sucursal_id')}`), null)
+      || safeJsonParse(getConfigVal(db, 'scale_settings'), null);
+    for (let i = 0; i < items.length; i++) {
+      if (!items[i].scaleLabel) continue;
+      const resolved = require('./scale-label').resolveScaleLabelItem(items[i], scaleSettings);
+      if (resolved.error) return jsonResponse(res, resolved.status, { error: resolved.error });
+      items[i] = resolved.item;
     }
   }
 
@@ -1357,8 +1368,8 @@ handlers['POST /sales'] = async (req, res, body) => {
     db.run(`
       INSERT INTO sale_items (sale_local_id, product_id, product_name, product_code, quantity,
         unit_price, client_unit_price, catalog_revision, price_proof, wholesale_minimum_quantity,
-        client_product_uuid, unit_cost_at_sale, cost_pending, receipt_price_uuid, stock_before)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        client_product_uuid, unit_cost_at_sale, cost_pending, receipt_price_uuid, stock_before, scale_label)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `, [
       localId, item.productId,
       item.productName,
@@ -1366,7 +1377,7 @@ handlers['POST /sales'] = async (req, res, body) => {
       item.quantity, item.unitPrice, item.clientUnitPrice,
       item.catalogRevision, item.priceProof, item.wholesaleMinimumQuantity,
       item.clientProductUuid, item.unitCostAtSale, item.costPending ? 1 : 0,
-      item.receiptPriceUuid, stockBefore,
+      item.receiptPriceUuid, stockBefore, item.scaleLabel || null,
     ]);
 
     // Decrement local stock. Los PESABLES quedan afuera igual que los no_code: se venden por kilo

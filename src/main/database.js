@@ -908,6 +908,9 @@ function runMigrations() {
       WHEN NEW.pricing_revision=OLD.pricing_revision AND (NEW.cost IS NOT OLD.cost OR NEW.price IS NOT OLD.price OR NEW.cost_pending IS NOT OLD.cost_pending OR NEW.cost_derived IS NOT OLD.cost_derived OR NEW.pricing_mode IS NOT OLD.pricing_mode OR NEW.target_markup_percent IS NOT OLD.target_markup_percent)
       BEGIN UPDATE products SET pricing_revision=OLD.pricing_revision+(NEW.cost IS NOT OLD.cost)+(NEW.price IS NOT OLD.price)+(NEW.cost_pending IS NOT OLD.cost_pending)+(NEW.cost_derived IS NOT OLD.cost_derived)+(NEW.pricing_mode IS NOT OLD.pricing_mode)+(NEW.target_markup_percent IS NOT OLD.target_markup_percent) WHERE id=NEW.id; END`);
   });
+  applyMigration(18, 'sale_items_scale_label', () => {
+    db.run('ALTER TABLE sale_items ADD COLUMN scale_label TEXT');
+  });
 
 }
 
