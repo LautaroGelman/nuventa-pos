@@ -4,6 +4,8 @@
 // Scale labels whose PLU is not loaded as a product: sold as "Balanza (PLU …)".
 // Same rules as `parseScaleBarcode` (frontend) and `ScaleSettingsService.parse` (backend).
 // The amount comes from the label, never from the price sent by the sale screen.
+// A mask with W carries the WEIGHT instead of the amount: those labels need a product (its price
+// per kg), so they are never sold as "Balanza (PLU …)".
 // =============================================================================
 
 function isValidEan13(code) {
@@ -12,23 +14,29 @@ function isValidEan13(code) {
   return (10 - (sum % 10)) % 10 === Number(code[12]);
 }
 
-/** { plu, amount } o null si el código no es una etiqueta válida para esta configuración. */
+/**
+ * { plu, amount } (máscara de importe) o { plu, weightGrams } (máscara de peso, W), o null si el
+ * código no es una etiqueta válida para esta configuración.
+ */
 function parseScaleLabel(code, settings) {
   const value = String(code ?? '').trim();
   const prefix = String(settings?.prefix ?? '').trim();
   const mask = String(settings?.mask ?? '').trim().toUpperCase();
   if (!/^\d{13}$/.test(value) || !/^\d{1,2}$/.test(prefix) || !value.startsWith(prefix)
-      || !/^[PIX]+$/.test(mask) || mask.length !== 13 - prefix.length - 1 || !isValidEan13(value)) return null;
+      || !/^[PIWX]+$/.test(mask) || mask.length !== 13 - prefix.length - 1 || !isValidEan13(value)) return null;
+  if (mask.includes('I') === mask.includes('W')) return null; // importe o peso, exactamente uno
   const body = value.slice(prefix.length, 12);
   let plu = '';
-  let rawAmount = '';
+  let rawValue = '';
   for (let i = 0; i < mask.length; i++) {
     if (mask[i] === 'P') plu += body[i];
-    else if (mask[i] === 'I') rawAmount += body[i];
+    else if (mask[i] === 'I' || mask[i] === 'W') rawValue += body[i];
   }
-  if (!plu || !rawAmount) return null;
-  const amount = settings.priceInCents ? Number(rawAmount) / 100 : Number(rawAmount);
-  return Number.isFinite(amount) && amount > 0 ? { plu, amount } : null;
+  if (!plu || !rawValue) return null;
+  const n = Number(rawValue);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (mask.includes('W')) return { plu, weightGrams: n };
+  return { plu, amount: settings.priceInCents ? n / 100 : n };
 }
 
 /**
@@ -44,6 +52,9 @@ function resolveScaleLabelItem(item, settings) {
   if (Number(item.quantity) !== 1) return { status: 400, error: 'Cada etiqueta de balanza se registra en su propia línea (cantidad 1).' };
   const parsed = parseScaleLabel(item.scaleLabel, settings);
   if (!parsed) return { status: 400, error: `La etiqueta de balanza ${item.scaleLabel} no es válida. Volvé a escanearla.` };
+  if (parsed.weightGrams != null) {
+    return { status: 400, error: `La etiqueta de balanza trae el peso: el PLU ${parsed.plu} tiene que estar cargado como producto pesable con su precio por kg.` };
+  }
   return { item: { ...item, scaleLabel: String(item.scaleLabel).trim(), customName: `Balanza (PLU ${parsed.plu})`, unitPrice: parsed.amount } };
 }
 

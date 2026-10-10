@@ -1200,11 +1200,13 @@ handlers['POST /sales'] = async (req, res, body) => {
     }
   }
   // Scale labels without a product: name and amount are rebuilt from the label with the branch settings.
-  if (items.some((it) => it.scaleLabel)) {
+  // Labels WITH a product are weighable lines whose label carries the weight: they keep the product
+  // and the amount the sale screen computed (weight × price per kg); the backend recomputes on sync.
+  if (items.some((it) => it.scaleLabel && it.productId == null)) {
     const scaleSettings = safeJsonParse(getConfigVal(db, `scale_settings:${getConfigVal(db, 'client_id')}:${getConfigVal(db, 'sucursal_id')}`), null)
       || safeJsonParse(getConfigVal(db, 'scale_settings'), null);
     for (let i = 0; i < items.length; i++) {
-      if (!items[i].scaleLabel) continue;
+      if (!items[i].scaleLabel || items[i].productId != null) continue;
       const resolved = require('./scale-label').resolveScaleLabelItem(items[i], scaleSettings);
       if (resolved.error) return jsonResponse(res, resolved.status, { error: resolved.error });
       items[i] = resolved.item;
@@ -1269,8 +1271,11 @@ handlers['POST /sales'] = async (req, res, body) => {
     return {
       ...item,
       productId: prod ? prod.id : item.productId,
+      // Una pesada por peso guarda el nombre con el peso ("Salchichón primo 2,315 kg x $9.700,00").
       productName: prod
-        ? prod.name
+        ? (prod.weighable && item.scaleLabel && item.customName && String(item.customName).trim()
+          ? String(item.customName).trim().slice(0, 255)
+          : prod.name)
         : (item.customName && String(item.customName).trim() ? String(item.customName).trim() : 'Producto'),
       productCode: prod ? prod.code : null,
       stockTracked: prod ? Number(prod.stock_tracked) !== 0 : false,

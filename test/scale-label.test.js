@@ -24,6 +24,19 @@ test('arma el renglón "Balanza (PLU …)" con el importe de la etiqueta, no el 
   assert.equal(result.item.unitPrice, 4350);
 });
 
+test('lee el peso con máscara W (Kretz Report LT de fábrica)', () => {
+  const kretz = { enabled: true, prefix: '20', mask: 'PPPPPWWWWW', priceInCents: true, unregisteredLabelsEnabled: true };
+  assert.deepEqual(parseScaleLabel('2000999023156', kretz), { plu: '00999', weightGrams: 2315 });
+  assert.equal(parseScaleLabel('2000999023156', { ...kretz, mask: 'PPPPPIIWWW' }), null);
+});
+
+test('una etiqueta con peso no se vende sin producto', () => {
+  const kretz = { enabled: true, prefix: '20', mask: 'PPPPPWWWWW', priceInCents: false, unregisteredLabelsEnabled: true };
+  const result = resolveScaleLabelItem({ productId: null, quantity: 1, scaleLabel: '2000999023156' }, kretz);
+  assert.equal(result.status, 400);
+  assert.match(result.error, /trae el peso/);
+});
+
 test('respeta la configuración de la sucursal y la cantidad 1', () => {
   const item = { productId: null, quantity: 1, scaleLabel: LABEL };
   assert.equal(resolveScaleLabelItem(item, { ...settings, unregisteredLabelsEnabled: false }).status, 403);
