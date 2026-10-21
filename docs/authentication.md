@@ -33,10 +33,13 @@ combina "¿existe el usuario localmente?" × "¿hay internet?":
 |--------------------|----------|--------|--------|
 | Sí | Online | Login remoto + actualizar datos locales | `_remoteLoginAndUpdate` ([:83](../src/main/auth-service.js#L83)) |
 | Sí | Offline | Login local por hash (ventana de 7 días) | `_offlineLogin` ([:186](../src/main/auth-service.js#L186)) |
-| No | Online | Primer login remoto + descarga de sucursal | `_firstRemoteLogin` ([:133](../src/main/auth-service.js#L133)) |
-| No | Offline | Error: hay que conectarse al menos una vez | — |
+| No | (sin sondeo) | Primer login remoto + descarga de sucursal | `_firstRemoteLogin` ([:133](../src/main/auth-service.js#L133)) |
+| No | Falla de red en el login | Error: hay que conectarse al menos una vez | — |
 
-La conexión se sondea con `apiClient.isOnline()` (`GET /api/auth/session-status`, timeout 5 s).
+Con usuario local, la conexión se sondea con `apiClient.isOnline()` (`GET /api/auth/session-status`,
+timeout 5 s). Sin usuario local no se sondea: no hay a qué volver, así que se intenta el login
+directamente (timeout 15 s) y solo un error de red sin respuesta HTTP muestra el mensaje de
+"Sin conexión".
 
 ### Login remoto (usuario existente u online por primera vez)
 1. `apiClient.login(email, password)` contra la nube.

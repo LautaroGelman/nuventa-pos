@@ -78,8 +78,8 @@ class AuthService {
    * 1. Check if user exists in local DB
    * 2. If yes + online  → remote login, update local data
    * 3. If yes + offline → local login (within 7-day window)
-   * 4. If no  + online  → remote login, create local user
-   * 5. If no  + offline → error (must connect for first login)
+   * 4. If no → remote login right away (no probe), create local user;
+   *    a network failure there → error (must connect for first login)
    *
    * @returns {{ success, user, token, needsSync, error, isOffline }}
    */
@@ -90,30 +90,23 @@ class AuthService {
 
     // Step 1: Check if user exists locally
     const localUser = db.get('SELECT * FROM users WHERE email = ?', [email]);
-    const isOnline = await this._checkOnline();
 
-    if (localUser) {
-      // ── User exists locally ──
-      if (isOnline) {
-        notify({ step: 'remote-login', message: 'Verificando credenciales en la nube...' });
-        return await this._remoteLoginAndUpdate(email, password, localUser, notify, legalNotice);
-      } else {
-        notify({ step: 'offline-login', message: 'Sin conexión. Verificando credenciales locales...' });
-        return this._offlineLogin(email, password, localUser);
-      }
-    } else {
+    if (!localUser) {
       // ── User NOT in local DB ──
-      if (isOnline) {
-        notify({ step: 'first-login', message: 'Primer inicio de sesión. Conectando al servidor...' });
-        return await this._firstRemoteLogin(email, password, notify, legalNotice);
-      } else {
-        return {
-          success: false,
-          error: 'Sin conexión a internet. La primera vez que iniciás sesión necesitás estar conectado para descargar los datos.',
-          isOffline: true,
-        };
-      }
+      // No reachability probe here: with nothing to fall back to, the login request
+      // itself is the connectivity test (a slow probe used to block first logins).
+      notify({ step: 'first-login', message: 'Primer inicio de sesión. Conectando al servidor...' });
+      return await this._firstRemoteLogin(email, password, notify, legalNotice);
     }
+
+    // ── User exists locally ──
+    const isOnline = await this._checkOnline();
+    if (isOnline) {
+      notify({ step: 'remote-login', message: 'Verificando credenciales en la nube...' });
+      return await this._remoteLoginAndUpdate(email, password, localUser, notify, legalNotice);
+    }
+    notify({ step: 'offline-login', message: 'Sin conexión. Verificando credenciales locales...' });
+    return this._offlineLogin(email, password, localUser);
   }
 
   /**
@@ -216,6 +209,15 @@ class AuthService {
     } catch (err) {
       if (err.message && err.message.includes('HTTP 401')) {
         return { success: false, error: 'Email o contraseña incorrectos.' };
+      }
+      // fetch() rejects without an HTTP status on DNS/TLS/timeout failures: the
+      // request never reached the backend.
+      if (!err.status && !err.code && (err.name === 'AbortError' || err.name === 'TypeError')) {
+        return {
+          success: false,
+          error: 'Sin conexión a internet. La primera vez que iniciás sesión necesitás estar conectado para descargar los datos.',
+          isOffline: true,
+        };
       }
       return {
         success: false,

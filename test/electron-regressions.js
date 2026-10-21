@@ -139,6 +139,15 @@ app.whenReady().then(async()=>{
   assert.equal(authService._offlineLogin(oldUser.email,'password',oldUser).success,false);
   record('offline_login_without_remote_token',{passed:true});
 
+  reset();const realLogin=apiClient.login;let loginCalls=0;
+  apiClient.login=async()=>{loginCalls++;throw new TypeError('fetch failed');};
+  const firstOffline=await authService.login('first-login@demo.nuventa.local','password');
+  assert.equal(loginCalls,1);assert.equal(firstOffline.success,false);assert.equal(firstOffline.isOffline,true);
+  apiClient.login=async()=>{loginCalls++;throw Object.assign(new Error('HTTP 401: bad'),{status:401});};
+  assert.equal((await authService.login('first-login@demo.nuventa.local','password')).error,'Email o contraseña incorrectos.');
+  apiClient.login=realLogin;
+  record('first_login_skips_reachability_probe',{passed:true});
+
   reset();await request('/sales',sale());record('payload_not_frozen_at_commit',{outbox:db.all('SELECT mutation_type,payload_json,payload_hash FROM sync_outbox')});
   const {SyncService}=require(path.join(root,'src/main/sync-service'));const sync=new SyncService();sync._bundleV2Available=true;
   apiClient.isOnline=async()=>true;apiClient.lastHeartbeatAuthed=true;
