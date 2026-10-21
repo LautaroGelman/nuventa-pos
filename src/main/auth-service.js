@@ -211,8 +211,9 @@ class AuthService {
         return { success: false, error: 'Email o contraseña incorrectos.' };
       }
       // fetch() rejects without an HTTP status on DNS/TLS/timeout failures: the
-      // request never reached the backend.
-      if (!err.status && !err.code && (err.name === 'AbortError' || err.name === 'TypeError')) {
+      // request never reached the backend. Node reports TypeError, Chromium net::ERR_*.
+      if (!err.status && err.code !== 'LEGAL_DOCUMENT_CHANGED'
+          && (err.name === 'AbortError' || err.name === 'TypeError' || /net::ERR_/.test(err.message || ''))) {
         return {
           success: false,
           error: 'Sin conexión a internet. La primera vez que iniciás sesión necesitás estar conectado para descargar los datos.',

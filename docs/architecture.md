@@ -102,8 +102,12 @@ protocol.handle('http')  [index.js:138]
 Puntos clave:
 - **`bypassCustomProtocolHandlers: true`** es obligatorio en el passthrough; sin él, el handler se
   re-dispara recursivamente y la página queda en blanco ([index.js:170](../src/main/index.js#L170)).
-- El `sync-service` usa `fetch` del proceso main, que **no** pasa por `protocol.handle()`; por eso
-  habla directo con la nube sin caer en el servidor local.
+- Al arrancar, `index.js` reemplaza el `fetch` global del proceso main por `net.fetch` (red de
+  Chromium: proxy y certificados de Windows, igual que el navegador) con
+  `bypassCustomProtocolHandlers: true`. El `fetch` de Node ignoraba ambos y, detrás de un proxy o
+  de un antivirus que inspecciona HTTPS, todas las llamadas a la nube fallaban como "sin conexión".
+  Gracias al bypass, `api-client`, `sync-service` y los proxies del servidor local hablan directo
+  con la nube sin caer en el servidor local. Los errores de red llegan como `Error: net::ERR_*`.
 
 ## 5. Carga de la UI (static-first)
 

@@ -143,6 +143,8 @@ app.whenReady().then(async()=>{
   apiClient.login=async()=>{loginCalls++;throw new TypeError('fetch failed');};
   const firstOffline=await authService.login('first-login@demo.nuventa.local','password');
   assert.equal(loginCalls,1);assert.equal(firstOffline.success,false);assert.equal(firstOffline.isOffline,true);
+  apiClient.login=async()=>{throw new Error('net::ERR_CERT_AUTHORITY_INVALID');};
+  assert.equal((await authService.login('first-login@demo.nuventa.local','password')).isOffline,true);
   apiClient.login=async()=>{loginCalls++;throw Object.assign(new Error('HTTP 401: bad'),{status:401});};
   assert.equal((await authService.login('first-login@demo.nuventa.local','password')).error,'Email o contraseña incorrectos.');
   apiClient.login=realLogin;

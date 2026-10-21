@@ -1030,6 +1030,12 @@ app.whenReady().then(async () => {
   // This is a process-scoped request, not a permanent change to the Windows power plan.
   displaySleepBlockerId = powerSaveBlocker.start('prevent-display-sleep');
 
+  // 0. Main-process fetch() through Chromium's network stack. Node's fetch ignores the
+  // Windows proxy and certificate store, so behind a proxy or an antivirus that inspects
+  // HTTPS the browser works but every cloud call (login included) fails as "offline".
+  // bypassCustomProtocolHandlers is mandatory: https is intercepted by protocol.handle().
+  globalThis.fetch = (input, init = {}) => net.fetch(input, { ...init, bypassCustomProtocolHandlers: true });
+
   // 1. Config
   configStore.loadConfig();
 
